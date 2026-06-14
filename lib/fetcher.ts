@@ -48,19 +48,16 @@ function buildHeaders(targetUrl: string, accept: string): Record<string, string>
   return headers;
 }
 
-// Cho phép đi qua ScraperAPI (render JS + xoay proxy) nếu cấu hình SCRAPER_API_KEY.
-function wrapProxyUrl(url: string, render: boolean): string {
-  const key = process.env.SCRAPER_API_KEY;
-  if (key) {
-    const params = new URLSearchParams({
-      api_key: key,
-      url,
-      country_code: process.env.SCRAPER_COUNTRY || 'vn',
-    });
-    if (render) params.set('render', 'true');
-    return 'https://api.scraperapi.com/?' + params.toString();
-  }
-  return url;
+// Bọc URL qua ScraperAPI (proxy IP + tuỳ chọn render JS).
+function buildProxyUrl(url: string, render: boolean): string {
+  const key = process.env.SCRAPER_API_KEY || '';
+  const params = new URLSearchParams({
+    api_key: key,
+    url,
+    country_code: process.env.SCRAPER_COUNTRY || 'vn',
+  });
+  if (render) params.set('render', 'true');
+  return 'https://api.scraperapi.com/?' + params.toString();
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -114,17 +111,16 @@ function looksBlocked(status: number, text: string): boolean {
   return BLOCK_MARKERS.test(text.slice(0, 1500));
 }
 
-export async function smartFetch(url: string, opts: FetchOptions = {}): Promise<FetchResult> {
+async function fetchAttempts(url: string, opts: FetchOptions, useProxy: boolean): Promise<FetchResult> {
   const accept = opts.accept === 'json' ? 'application/json' : opts.accept === 'xml' ? 'application/xml' : 'text/html';
   const timeoutMs = opts.timeoutMs ?? 20000;
   const retries = opts.retries ?? 3;
 
-  let lastErr: unknown = null;
   for (let attempt = 0; attempt < retries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const target = wrapProxyUrl(url, !!opts.render);
+      const target = useProxy ? buildProxyUrl(url, !!opts.render) : url;
       const res = await fetch(target, {
         method: 'GET',
         headers: buildHeaders(url, accept),
@@ -133,9 +129,7 @@ export async function smartFetch(url: string, opts: FetchOptions = {}): Promise<
       });
       clearTimeout(timer);
 
-      // Bị chặn / lỗi tạm thời -> retry
       if (res.status === 429 || res.status === 403 || res.status >= 500) {
-        lastErr = new Error('HTTP ' + res.status);
         if (attempt < retries - 1) {
           await sleep(800 * Math.pow(2, attempt) + Math.floor(Math.random() * 400));
           continue;
@@ -147,20 +141,32 @@ export async function smartFetch(url: string, opts: FetchOptions = {}): Promise<
       const text = decodeBuffer(buf, charset);
       const blocked = looksBlocked(res.status, text);
       return { ok: res.ok, status: res.status, text, url: res.url || url, blocked };
-    } catch (err) {
+    } catch {
       clearTimeout(timer);
-      lastErr = err;
-      if (attempt < retries - 1) {
-        await sleep(700 * Math.pow(2, attempt) + Math.floor(Math.random() * 300));
-      }
+      if (attempt < retries - 1) await sleep(700 * Math.pow(2, attempt) + Math.floor(Math.random() * 300));
     }
   }
-  return {
-    ok: false,
-    status: 0,
-    text: '',
+  return { ok: false, status: 0, text: '', url };
+}
+
+/**
+ * Fetch thông minh: thử TRỰC TIẾP trước (nhanh, miễn phí). Chỉ khi bị chặn/lỗi VÀ có
+ * SCRAPER_API_KEY mới đi qua proxy (tốn credit) -> tiết kiệm credit cho web thường.
+ */
+export async function smartFetch(url: string, opts: FetchOptions = {}): Promise<FetchResult> {
+  const direct = await fetchAttempts(url, opts, false);
+  const hasKey = !!process.env.SCRAPER_API_KEY;
+  // Chỉ proxy khi bị CHẶN thật (mất kết nối/403/429/5xx/CAPTCHA), không proxy 404/200
+  const blockedDirect =
+    direct.status === 0 || direct.blocked || direct.status === 403 || direct.status === 429 || direct.status >= 500;
+  if (!hasKey || !blockedDirect) return direct;
+  // Trực tiếp bị chặn/lỗi -> thử qua proxy (timeout cao hơn vì proxy chậm)
+  const proxied = await fetchAttempts(
     url,
-  };
+    { ...opts, timeoutMs: Math.max(opts.timeoutMs ?? 20000, 50000), retries: 2 },
+    true,
+  );
+  return proxied.ok ? proxied : direct;
 }
 
 export async function fetchJson<T = unknown>(url: string, opts: FetchOptions = {}): Promise<T | null> {
