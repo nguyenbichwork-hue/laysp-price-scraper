@@ -121,13 +121,62 @@ function extractLocs(xml: string): string[] {
   return locs;
 }
 
-const PRODUCT_URL_HINTS = /(\/product\/|\/products\/|\/san-pham\/|\/p\/|\/sp\/|-p\d+|\/dp\/)/i;
+const PRODUCT_URL_HINTS = /(\/product\/|\/products\/|\/san-pham\/|\/p\/|\/sp\/|-p\d+|\/dp\/|\.html)/i;
+
+function normUrlLocal(u: string): string {
+  try {
+    const x = new URL(u);
+    return (x.origin + x.pathname).replace(/\/+$/, '').toLowerCase();
+  } catch {
+    return (u || '').replace(/[#?].*$/, '').replace(/\/+$/, '').toLowerCase();
+  }
+}
+
+/** Lấy các link cùng domain trên một trang HTML (dùng để nhận diện menu/danh mục). */
+export function extractInternalLinks(html: string, origin: string): Set<string> {
+  const set = new Set<string>();
+  const re = /href\s*=\s*["']([^"']+)["']/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const href = m[1];
+    if (!href || href.startsWith('#') || href.startsWith('javascript:') || href.startsWith('mailto:')) continue;
+    try {
+      const abs = new URL(href, origin).href;
+      if (new URL(abs).origin === origin) set.add(normUrlLocal(abs));
+    } catch {
+      /* ignore */
+    }
+  }
+  return set;
+}
+
+// Sắp xếp URL: trang sản phẩm (không nằm trong menu trang chủ) lên trước,
+// trang danh mục/menu xuống sau -> tận dụng thời gian crawl hiệu quả hơn.
+function prioritizeUrls(urls: string[], origin: string, navSet: Set<string>, max: number): string[] {
+  const homeNorm = normUrlLocal(origin);
+  const seen = new Set<string>();
+  const uniq: string[] = [];
+  for (const u of urls) {
+    const n = normUrlLocal(u);
+    if (n === homeNorm || seen.has(n)) continue;
+    seen.add(n);
+    uniq.push(u);
+  }
+  const scored = uniq.map((u) => {
+    let rank = PRODUCT_URL_HINTS.test(u) ? 0 : 1;
+    if (navSet.has(normUrlLocal(u))) rank += 3; // có trong menu -> nhiều khả năng là danh mục
+    return { u, rank };
+  });
+  scored.sort((a, b) => a.rank - b.rank);
+  return scored.slice(0, max).map((s) => s.u);
+}
 
 export async function trySitemap(
   origin: string,
   maxProducts: number,
   deadline: number,
   concurrency: number,
+  navSet: Set<string> = new Set(),
 ): Promise<PlatformResult | null> {
   const candidates = [
     `${origin}/sitemap.xml`,
@@ -166,15 +215,15 @@ export async function trySitemap(
 
   if (productUrls.length === 0) return null;
 
-  // Ưu tiên URL trông giống trang sản phẩm
-  const looksProduct = productUrls.filter((u) => PRODUCT_URL_HINTS.test(u));
-  const chosen = (looksProduct.length ? looksProduct : productUrls).slice(0, maxProducts);
+  const totalFound = new Set(productUrls.map(normUrlLocal)).size;
+  // Ưu tiên trang sản phẩm (không nằm trong menu trang chủ) lên trước
+  const chosen = prioritizeUrls(productUrls, origin, navSet, maxProducts);
 
   const products = await crawlUrls(chosen, deadline, concurrency);
   if (products.length === 0) return null;
   const note =
-    chosen.length < (looksProduct.length || productUrls.length)
-      ? `Sitemap có ${looksProduct.length || productUrls.length} URL, đã lấy ${products.length}.`
+    totalFound > products.length
+      ? `Sitemap có ${totalFound} URL; đã lấy ${products.length} sản phẩm trong giới hạn thời gian (tăng "Giới hạn SP/web" hoặc chạy lại để lấy thêm).`
       : undefined;
   return { platform: 'sitemap', products, note };
 }

@@ -22,8 +22,8 @@ export async function POST(req: NextRequest) {
 
   const result = await crawlSite(url, {
     maxProducts,
-    timeBudgetMs: 50000, // chừa thời gian trả về trước maxDuration
-    concurrency: 6,
+    timeBudgetMs: 52000, // chừa thời gian trả về trước maxDuration (60s)
+    concurrency: 10,
   });
 
   return NextResponse.json(result);

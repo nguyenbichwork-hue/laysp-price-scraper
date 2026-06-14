@@ -8,6 +8,7 @@ import {
   tryWooCommerce,
   trySitemap,
   tryHomepageLinks,
+  extractInternalLinks,
 } from './platforms';
 import { extractProductsFromHtml } from './extractor';
 
@@ -19,8 +20,8 @@ export interface CrawlConfig {
 
 const DEFAULTS: CrawlConfig = {
   maxProducts: 1000,
-  timeBudgetMs: 50000,
-  concurrency: 6,
+  timeBudgetMs: 52000,
+  concurrency: 10,
 };
 
 function siteNameFromUrl(url: string): string {
@@ -59,14 +60,15 @@ export async function crawlSite(inputUrl: string, cfgPartial: Partial<CrawlConfi
     const woo = await tryWooCommerce(origin, cfg.maxProducts, deadline);
     if (woo && woo.products.length) return finalize(inputUrl, siteName, woo.platform, woo.products, woo.note);
 
-    // 3) Sitemap.xml -> trang sản phẩm
+    // Lấy HTML trang chủ sớm để nhận diện menu/danh mục (dùng cho bước 3, 4, 5)
+    const home = await smartFetch(url, { accept: 'html', timeoutMs: 20000, retries: 2 });
+    const navSet = home.ok ? extractInternalLinks(home.text, origin) : new Set<string>();
+
+    // 3) Sitemap.xml -> trang sản phẩm (ưu tiên trang KHÔNG nằm trong menu trang chủ)
     if (Date.now() < deadline) {
-      const sm = await trySitemap(origin, cfg.maxProducts, deadline, cfg.concurrency);
+      const sm = await trySitemap(origin, cfg.maxProducts, deadline, cfg.concurrency, navSet);
       if (sm && sm.products.length) return finalize(inputUrl, siteName, sm.platform, sm.products, sm.note);
     }
-
-    // Lấy HTML trang chủ (dùng cho bước 4 và 5)
-    const home = await smartFetch(url, { accept: 'html', timeoutMs: 20000, retries: 2 });
 
     // 4) Quét link sản phẩm trên trang chủ
     if (home.ok && Date.now() < deadline) {

@@ -19,19 +19,24 @@ export function parsePrice(raw: unknown): number | null {
 
   const lastDot = token.lastIndexOf('.');
   const lastComma = token.lastIndexOf(',');
+  const dotCount = (token.match(/\./g) || []).length;
+  const commaCount = (token.match(/,/g) || []).length;
   let decimalSep: '.' | ',' | null = null;
 
-  if (lastDot !== -1 && lastComma !== -1) {
+  if (dotCount > 0 && commaCount > 0) {
     // Cả hai dấu xuất hiện -> dấu nằm sau cùng là dấu thập phân
     decimalSep = lastDot > lastComma ? '.' : ',';
-  } else if (lastComma !== -1) {
-    const after = token.length - lastComma - 1;
-    const count = (token.match(/,/g) || []).length;
-    decimalSep = count === 1 && after >= 1 && after <= 2 ? ',' : null;
-  } else if (lastDot !== -1) {
+  } else if (dotCount === 1) {
+    // Một dấu chấm: chỉ là dấu phân cách nghìn khi theo sau đúng 3 chữ số
+    // (vd "10.420"=10420). Ngược lại là thập phân (vd "10420000.0000", "10.42").
     const after = token.length - lastDot - 1;
-    const count = (token.match(/\./g) || []).length;
-    decimalSep = count === 1 && after >= 1 && after <= 2 ? '.' : null;
+    decimalSep = after === 3 ? null : '.';
+  } else if (commaCount === 1) {
+    const after = token.length - lastComma - 1;
+    decimalSep = after === 3 ? null : ',';
+  } else {
+    // 0 dấu, hoặc nhiều dấu cùng loại (vd "1.990.000") -> tất cả là dấu nghìn
+    decimalSep = null;
   }
 
   let intPart: string;
