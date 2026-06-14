@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: radial-gradient(1200px 600px at 10% -10%, #e0e7ff 0%, transparent 55%),
+    radial-gradient(1000px 500px at 110% 10%, #cffafe 0%, transparent 50%), #f8fafc;
+  min-height: 100vh;
+}
+
+/* Thanh cuộn gọn gàng */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
