@@ -77,6 +77,41 @@ export interface FetchResult {
   status: number;
   text: string;
   url: string;
+  blocked?: boolean; // trang chặn bot / CAPTCHA / Cloudflare challenge
+}
+
+// Decode buffer theo charset thật (sửa lỗi font với web không dùng UTF-8).
+function decodeBuffer(buf: ArrayBuffer, charset?: string): string {
+  const tryDecode = (label: string) => {
+    try {
+      return new TextDecoder(label as any).decode(buf);
+    } catch {
+      return null;
+    }
+  };
+  let cs = (charset || '').toLowerCase().trim().replace(/^['"]|['"]$/g, '');
+  let text = cs && !/utf-?8/.test(cs) ? tryDecode(cs) : null;
+  if (text == null) text = tryDecode('utf-8') ?? '';
+  // Nếu header không khai báo nhưng meta trong HTML khác UTF-8 -> decode lại
+  if (!cs) {
+    const meta = text.slice(0, 3000).match(/charset\s*=\s*["']?\s*([\w-]+)/i);
+    const metaCs = meta?.[1]?.toLowerCase();
+    if (metaCs && !/utf-?8/.test(metaCs)) {
+      const redo = tryDecode(metaCs);
+      if (redo != null) text = redo;
+    }
+  }
+  return text;
+}
+
+const BLOCK_MARKERS =
+  /(just a moment|attention required|cf-browser-verification|cf-challenge|captcha|access denied|請稍候|verifying you are human|enable javascript and cookies)/i;
+
+function looksBlocked(status: number, text: string): boolean {
+  if (status === 403 || status === 503 || status === 429) {
+    if (BLOCK_MARKERS.test(text.slice(0, 4000))) return true;
+  }
+  return BLOCK_MARKERS.test(text.slice(0, 1500));
 }
 
 export async function smartFetch(url: string, opts: FetchOptions = {}): Promise<FetchResult> {
@@ -107,8 +142,11 @@ export async function smartFetch(url: string, opts: FetchOptions = {}): Promise<
         }
       }
 
-      const text = await res.text();
-      return { ok: res.ok, status: res.status, text, url: res.url || url };
+      const charset = (res.headers.get('content-type') || '').match(/charset=([^;]+)/i)?.[1];
+      const buf = await res.arrayBuffer();
+      const text = decodeBuffer(buf, charset);
+      const blocked = looksBlocked(res.status, text);
+      return { ok: res.ok, status: res.status, text, url: res.url || url, blocked };
     } catch (err) {
       clearTimeout(timer);
       lastErr = err;

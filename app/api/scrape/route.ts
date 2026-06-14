@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { crawlSite } from '@/lib/crawler';
+import { discover, runTask } from '@/lib/crawler';
+import type { Task } from '@/lib/types';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 60; // giây — giới hạn cho mỗi web
+export const maxDuration = 60; // giây
 
 export async function POST(req: NextRequest) {
   let body: any;
@@ -14,17 +15,17 @@ export async function POST(req: NextRequest) {
   }
 
   const url: string = (body?.url || '').toString().trim();
-  if (!url) {
-    return NextResponse.json({ error: 'Thiếu url' }, { status: 400 });
+  if (!url) return NextResponse.json({ error: 'Thiếu url' }, { status: 400 });
+
+  const maxProducts = Math.min(Number(body?.maxProducts) || 2000, 20000);
+  const cfg = { maxProducts, timeBudgetMs: 45000, concurrency: 14 };
+
+  // Có task -> vòng làm việc tiếp; không -> vòng khám phá
+  if (body?.task) {
+    const result = await runTask(url, body.task as Task, cfg);
+    return NextResponse.json(result);
   }
 
-  const maxProducts = Math.min(Number(body?.maxProducts) || 1000, 5000);
-
-  const result = await crawlSite(url, {
-    maxProducts,
-    timeBudgetMs: 52000, // chừa thời gian trả về trước maxDuration (60s)
-    concurrency: 10,
-  });
-
+  const result = await discover(url, cfg);
   return NextResponse.json(result);
 }

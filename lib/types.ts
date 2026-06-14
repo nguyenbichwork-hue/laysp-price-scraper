@@ -20,10 +20,45 @@ export type Platform =
   | 'haravan'
   | 'sapo'
   | 'woocommerce'
+  | 'listing-pages'
   | 'sitemap'
   | 'homepage-links'
+  | 'spa-state'
   | 'single-page'
   | 'unknown';
+
+// ----- Cơ chế crawl nhiều vòng (resumable) -----
+
+/** Công việc cho vòng tiếp theo, client gửi lại server. */
+export type Task =
+  | { strategy: 'api'; kind: 'shopify' | 'woo'; page: number }
+  | { strategy: 'fetchUrls'; mode: 'detail' | 'listing' | 'auto'; urls: string[] };
+
+/** Kết quả vòng khám phá (request không có task). */
+export interface DiscoverResult {
+  url: string;
+  siteName: string;
+  platform: Platform;
+  /** 'api' = phân trang API; 'urls' = client giữ worklist URL; 'done' = xong luôn */
+  mode: 'api' | 'urls' | 'done';
+  products: Product[];
+  task?: { kind: 'shopify' | 'woo'; page: number }; // khi mode='api'
+  worklist?: string[]; // khi mode='urls'
+  urlMode?: 'detail' | 'listing' | 'auto'; // cách xử lý worklist
+  total?: number | null; // ước lượng tổng SP nếu biết
+  note?: string;
+  error?: string;
+  needsRender?: boolean; // web SPA/chặn bot, cần SCRAPER_API_KEY
+}
+
+/** Kết quả một vòng làm việc (request có task). */
+export interface TaskRoundResult {
+  products: Product[];
+  task?: { kind: 'shopify' | 'woo'; page: number } | null; // api: trang kế, null=hết
+  enqueueUrls?: string[]; // listing: các trang/URL cần thêm vào worklist
+  note?: string;
+  error?: string;
+}
 
 export interface SiteResult {
   /** URL gốc người dùng nhập */

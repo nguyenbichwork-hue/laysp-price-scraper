@@ -1,8 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-
-type Status = 'pending' | 'running' | 'done' | 'error';
+import { useMemo, useRef, useState } from 'react';
 
 interface Product {
   code: string;
@@ -12,41 +10,62 @@ interface Product {
   currency: string;
   url: string;
 }
+type Task =
+  | { strategy: 'api'; kind: 'shopify' | 'woo'; page: number }
+  | { strategy: 'fetchUrls'; mode: 'detail' | 'listing' | 'auto'; urls: string[] };
 
-interface SiteResult {
-  url: string;
-  siteName: string;
-  platform: string;
-  products: Product[];
-  count: number;
-  note?: string;
-  error?: string;
-}
+type Status = 'pending' | 'running' | 'done' | 'error';
 
-interface Row extends Partial<SiteResult> {
+interface Row {
   input: string;
   status: Status;
+  siteName?: string;
+  platform?: string;
+  products: Product[];
+  count: number;
+  total?: number | null;
+  note?: string;
+  error?: string;
+  needsRender?: boolean;
+  phase?: string; // mô tả đang làm gì
 }
 
 const PLATFORM_LABEL: Record<string, string> = {
-  shopify: 'Shopify',
-  haravan: 'Haravan',
-  sapo: 'Sapo',
+  shopify: 'Shopify/Haravan/Sapo',
   woocommerce: 'WooCommerce',
+  'listing-pages': 'Trang danh mục',
   sitemap: 'Sitemap',
   'homepage-links': 'Quét trang chủ',
+  'spa-state': 'SPA (dữ liệu nhúng)',
   'single-page': 'Trang đơn',
   unknown: 'Không rõ',
 };
 
-const CONCURRENCY = 3;
+const SITE_CONCURRENCY = 3;
+const LISTING_BATCH = 14;
+const DETAIL_BATCH = 56;
+const MAX_ROUNDS = 400;
+
+function normU(u: string): string {
+  try {
+    const x = new URL(u);
+    return (x.origin + x.pathname).replace(/\/+$/, '').toLowerCase();
+  } catch {
+    return (u || '').toLowerCase();
+  }
+}
+function keyOf(p: Product): string {
+  const u = p.url ? normU(p.url) : '';
+  return u || 'n:' + p.name.toLowerCase() + '|' + (p.salePrice ?? '');
+}
 
 export default function Home() {
   const [text, setText] = useState('');
-  const [maxProducts, setMaxProducts] = useState(1000);
+  const [maxProducts, setMaxProducts] = useState(2000);
   const [rows, setRows] = useState<Row[]>([]);
   const [running, setRunning] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const stopRef = useRef(false);
 
   const urls = useMemo(
     () =>
@@ -64,58 +83,149 @@ export default function Home() {
   const done = rows.length > 0 && rows.every((r) => r.status === 'done' || r.status === 'error');
   const totalProducts = rows.reduce((s, r) => s + (r.count || 0), 0);
   const okSites = rows.filter((r) => r.status === 'done').length;
-  const progress = rows.length ? Math.round((rows.filter((r) => r.status === 'done' || r.status === 'error').length / rows.length) * 100) : 0;
+  const finished = rows.filter((r) => r.status === 'done' || r.status === 'error').length;
+  const progress = rows.length ? Math.round((finished / rows.length) * 100) : 0;
+
+  function patchRow(i: number, patch: Partial<Row>) {
+    setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  }
+
+  async function callApi(url: string, task?: Task): Promise<any> {
+    const res = await fetch('/api/scrape', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, maxProducts, task }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.json();
+  }
+
+  async function runSite(i: number, url: string) {
+    patchRow(i, { status: 'running', phase: 'Đang dò nền tảng…' });
+    const products: Product[] = [];
+    const seen = new Set<string>();
+    const addAll = (arr: Product[]): number => {
+      let added = 0;
+      for (const p of arr || []) {
+        const k = keyOf(p);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        products.push(p);
+        added++;
+      }
+      return added;
+    };
+
+    try {
+      const disc = await callApi(url);
+      patchRow(i, { siteName: disc.siteName, platform: disc.platform, note: disc.note, needsRender: disc.needsRender });
+      addAll(disc.products);
+      patchRow(i, { products: [...products], count: products.length, total: disc.total ?? undefined, phase: phaseText(disc.platform) });
+
+      if (disc.error && products.length === 0) {
+        patchRow(i, { status: 'error', error: disc.error, phase: undefined });
+        return;
+      }
+
+      // ---- API mode (Shopify/Haravan/Sapo, WooCommerce) ----
+      if (disc.mode === 'api') {
+        let task: Task | null = disc.task || null;
+        let rounds = 0;
+        while (task && !stopRef.current && products.length < maxProducts && rounds < MAX_ROUNDS) {
+          rounds++;
+          patchRow(i, { phase: `Đang tải sản phẩm… (${products.length})` });
+          const r = await callApi(url, task);
+          addAll(r.products);
+          patchRow(i, { products: [...products], count: products.length });
+          task = r.task || null;
+        }
+      }
+
+      // ---- URLs mode (auto / listing / detail) ----
+      else if (disc.mode === 'urls' && Array.isArray(disc.worklist)) {
+        const mode: 'auto' | 'listing' | 'detail' =
+          disc.urlMode === 'detail' ? 'detail' : disc.urlMode === 'listing' ? 'listing' : 'auto';
+        const batchSize = mode === 'listing' ? LISTING_BATCH : mode === 'detail' ? DETAIL_BATCH : 40;
+        const worklist: string[] = [];
+        const wlSeen = new Set<string>();
+        const enqueue = (us: string[]) => {
+          for (const u of us || []) {
+            const k = normU(u);
+            if (wlSeen.has(k)) continue;
+            wlSeen.add(k);
+            worklist.push(u);
+          }
+        };
+        enqueue(disc.worklist);
+
+        let pos = 0;
+        let rounds = 0;
+        let dry = 0;
+        while (pos < worklist.length && !stopRef.current && products.length < maxProducts && rounds < MAX_ROUNDS) {
+          rounds++;
+          const batch = worklist.slice(pos, pos + batchSize);
+          pos += batch.length;
+          const before = worklist.length;
+          patchRow(i, { phase: `Đang lấy… ${products.length} SP (đã quét ${pos}/${worklist.length} trang)` });
+          const r = await callApi(url, { strategy: 'fetchUrls', mode, urls: batch });
+          const added = addAll(r.products);
+          if (r.enqueueUrls) enqueue(r.enqueueUrls);
+          patchRow(i, { products: [...products], count: products.length });
+          const grew = worklist.length > before;
+          dry = added === 0 && !grew ? dry + 1 : 0;
+          if (dry >= 5 && pos >= worklist.length) break;
+        }
+      }
+
+      const stopped = stopRef.current;
+      const capped = products.length >= maxProducts;
+      let note = disc.note;
+      if (capped) note = `Đã đạt giới hạn ${maxProducts} SP (tăng giới hạn để lấy thêm).`;
+      else if (stopped) note = `Đã dừng theo yêu cầu (${products.length} SP).`;
+      patchRow(i, { status: 'done', count: products.length, products: [...products], note, phase: undefined });
+    } catch (e: any) {
+      patchRow(i, {
+        status: products.length ? 'done' : 'error',
+        count: products.length,
+        products: [...products],
+        error: products.length ? undefined : e?.message || 'Lỗi kết nối',
+        phase: undefined,
+      });
+    }
+  }
 
   async function start() {
     if (urls.length === 0 || running) return;
+    stopRef.current = false;
     setRunning(true);
-    const initial: Row[] = urls.map((u) => ({ input: u, status: 'pending' }));
-    setRows(initial);
+    setRows(urls.map((u) => ({ input: u, status: 'pending', products: [], count: 0 })));
 
     const queue = urls.map((u, i) => ({ u, i }));
     let cursor = 0;
-
-    async function worker() {
-      while (cursor < queue.length) {
+    const worker = async () => {
+      while (cursor < queue.length && !stopRef.current) {
         const { u, i } = queue[cursor++];
-        setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, status: 'running' } : r)));
-        try {
-          const res = await fetch('/api/scrape', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: u, maxProducts }),
-          });
-          const data: SiteResult = await res.json();
-          setRows((prev) =>
-            prev.map((r, idx) =>
-              idx === i
-                ? {
-                    ...r,
-                    ...data,
-                    status: data.error && (!data.products || data.products.length === 0) ? 'error' : 'done',
-                  }
-                : r,
-            ),
-          );
-        } catch (e: any) {
-          setRows((prev) =>
-            prev.map((r, idx) => (idx === i ? { ...r, status: 'error', error: e?.message || 'Lỗi kết nối' } : r)),
-          );
-        }
+        await runSite(i, u);
       }
-    }
-
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, () => worker()));
+      // nếu bị dừng, đánh dấu các site chưa chạy là done(rỗng)
+    };
+    await Promise.all(Array.from({ length: Math.min(SITE_CONCURRENCY, queue.length) }, () => worker()));
+    // đảm bảo không còn trạng thái pending/running treo
+    setRows((prev) => prev.map((r) => (r.status === 'pending' || r.status === 'running' ? { ...r, status: 'done', phase: undefined } : r)));
     setRunning(false);
+  }
+
+  function stop() {
+    stopRef.current = true;
   }
 
   async function download() {
     const sites = rows
-      .filter((r) => r.siteName)
+      .filter((r) => r.siteName || r.products.length)
       .map((r) => ({
-        url: r.url || r.input,
-        siteName: r.siteName,
-        platform: r.platform,
+        url: r.input,
+        siteName: r.siteName || r.input,
+        platform: r.platform || 'unknown',
         products: r.products || [],
         count: r.count || 0,
         note: r.note,
@@ -149,33 +259,25 @@ export default function Home() {
   }
 
   function loadSample() {
-    setText(
-      [
-        'https://canifa.com',
-        'https://www.thecoffeehouse.com',
-        'https://cellphones.com.vn',
-      ].join('\n'),
-    );
+    setText(['https://allbirds.com', 'https://thienkimhome.com', 'https://www.vascara.com'].join('\n'));
   }
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8 sm:py-12">
-      {/* Header */}
       <header className="mb-8 text-center">
         <div className="mb-3 inline-flex items-center gap-2 rounded-full bg-white/70 px-4 py-1.5 text-xs font-semibold text-indigo-700 shadow-sm ring-1 ring-indigo-100">
           <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-500" />
-          Tự động · Đa website · Xuất Excel
+          Tự động · Lấy 1000+ SP/web · Xuất Excel
         </div>
         <h1 className="bg-gradient-to-r from-indigo-600 via-blue-600 to-cyan-500 bg-clip-text text-3xl font-extrabold tracking-tight text-transparent sm:text-4xl">
           Lấy Giá Sản Phẩm Tự Động
         </h1>
         <p className="mx-auto mt-3 max-w-2xl text-sm text-slate-500 sm:text-base">
           Dán danh sách link website (mỗi dòng 1 link). Hệ thống tự lấy mã, tên, giá gốc, giá bán của toàn bộ
-          sản phẩm rồi xuất Excel — mỗi web một tab, kèm tab tổng hợp tìm giá rẻ nhất.
+          sản phẩm (chạy nhiều vòng để vượt giới hạn thời gian), rồi xuất Excel — mỗi web một tab, kèm tab tổng hợp tìm giá rẻ nhất.
         </p>
       </header>
 
-      {/* Input card */}
       <section className="rounded-2xl bg-white p-5 shadow-xl shadow-slate-200/60 ring-1 ring-slate-100 sm:p-7">
         <div className="mb-2 flex items-center justify-between">
           <label className="text-sm font-semibold text-slate-700">Danh sách link website</label>
@@ -197,17 +299,15 @@ export default function Home() {
               <label className="block text-xs font-medium text-slate-500">Giới hạn SP / web</label>
               <input
                 type="number"
-                min={10}
-                max={5000}
-                step={50}
+                min={50}
+                max={20000}
+                step={100}
                 value={maxProducts}
-                onChange={(e) => setMaxProducts(Math.max(10, Math.min(5000, Number(e.target.value) || 1000)))}
+                onChange={(e) => setMaxProducts(Math.max(50, Math.min(20000, Number(e.target.value) || 2000)))}
                 className="mt-1 w-28 rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
               />
             </div>
-            <span className="hidden text-xs text-slate-400 sm:block">
-              {urls.length} link · tránh quá tải nên đặt giới hạn hợp lý
-            </span>
+            <span className="hidden text-xs text-slate-400 sm:block">{urls.length} link · web nhiều SP sẽ chạy lâu hơn</span>
           </div>
 
           <div className="flex gap-3">
@@ -222,28 +322,30 @@ export default function Home() {
             >
               Xoá
             </button>
-            <button
-              onClick={start}
-              disabled={running || urls.length === 0}
-              type="button"
-              className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-200 transition hover:from-indigo-700 hover:to-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {running ? (
-                <>
-                  <Spinner /> Đang lấy dữ liệu…
-                </>
-              ) : (
-                <>⚡ Bắt đầu lấy dữ liệu</>
-              )}
-            </button>
+            {running ? (
+              <button
+                onClick={stop}
+                type="button"
+                className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-rose-500 to-red-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-rose-200 transition hover:from-rose-600 hover:to-red-700"
+              >
+                ■ Dừng
+              </button>
+            ) : (
+              <button
+                onClick={start}
+                disabled={urls.length === 0}
+                type="button"
+                className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-200 transition hover:from-indigo-700 hover:to-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                ⚡ Bắt đầu lấy dữ liệu
+              </button>
+            )}
           </div>
         </div>
       </section>
 
-      {/* Progress + results */}
       {rows.length > 0 && (
         <section className="mt-8 animate-fade-in">
-          {/* Stats */}
           <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
             <Stat label="Website" value={`${okSites}/${rows.length}`} />
             <Stat label="Tổng sản phẩm" value={totalProducts.toLocaleString('vi-VN')} />
@@ -251,7 +353,7 @@ export default function Home() {
             <div className="flex items-center justify-center rounded-2xl bg-white p-2 shadow-sm ring-1 ring-slate-100">
               <button
                 onClick={download}
-                disabled={!done || downloading || totalProducts === 0}
+                disabled={downloading || totalProducts === 0}
                 type="button"
                 className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 py-2.5 text-sm font-bold text-white shadow-md shadow-emerald-200 transition hover:from-emerald-600 hover:to-green-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -260,13 +362,12 @@ export default function Home() {
                     <Spinner /> Đang tạo…
                   </>
                 ) : (
-                  <>⬇ Tải Excel</>
+                  <>⬇ Tải Excel{!done && totalProducts > 0 ? ' (đã có)' : ''}</>
                 )}
               </button>
             </div>
           </div>
 
-          {/* Progress bar */}
           <div className="mb-5 h-2 w-full overflow-hidden rounded-full bg-slate-200">
             <div
               className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-cyan-500 transition-all duration-500"
@@ -274,7 +375,6 @@ export default function Home() {
             />
           </div>
 
-          {/* Per-site cards */}
           <div className="space-y-3">
             {rows.map((r, i) => (
               <SiteCard key={i} row={r} />
@@ -284,11 +384,18 @@ export default function Home() {
       )}
 
       <footer className="mt-12 text-center text-xs text-slate-400">
-        Ưu tiên dữ liệu có cấu trúc (products.json / WooCommerce API / sitemap) để lấy chính xác & ít bị chặn.
-        Với web dựng hoàn toàn bằng JS, hãy cấu hình biến môi trường <code>SCRAPER_API_KEY</code>.
+        Lấy theo nhiều chiến lược: API products.json / WooCommerce → trang danh mục → sitemap. Web dựng hoàn toàn bằng JS
+        cần cấu hình biến môi trường <code>SCRAPER_API_KEY</code>.
       </footer>
     </main>
   );
+}
+
+function phaseText(platform?: string): string {
+  if (platform === 'shopify' || platform === 'woocommerce') return 'Đang tải sản phẩm qua API…';
+  if (platform === 'listing-pages') return 'Đang lấy theo trang danh mục…';
+  if (platform === 'sitemap') return 'Đang lấy theo sitemap…';
+  return 'Đang lấy dữ liệu…';
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -316,16 +423,16 @@ function SiteCard({ row }: { row: Row }) {
           <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${s.dot}`} />
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold text-slate-700">{row.siteName || row.input}</div>
-            <div className="truncate text-xs text-slate-400">{row.input}</div>
+            <div className="truncate text-xs text-slate-400">{row.phase || row.input}</div>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {row.platform && row.status === 'done' && (
+          {row.platform && row.status !== 'pending' && (
             <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-600">
               {PLATFORM_LABEL[row.platform] || row.platform}
             </span>
           )}
-          {row.status === 'done' && (
+          {(row.count || 0) > 0 && (
             <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-600">
               {(row.count || 0).toLocaleString('vi-VN')} SP
             </span>
@@ -334,16 +441,18 @@ function SiteCard({ row }: { row: Row }) {
         </div>
       </div>
 
+      {row.needsRender && (
+        <p className="mt-2 rounded-lg bg-orange-50 px-3 py-1.5 text-xs text-orange-700">
+          ⚠ Web chặn bot / dựng bằng JS — cần cấu hình <code>SCRAPER_API_KEY</code> để lấy được.
+        </p>
+      )}
       {row.note && row.status === 'done' && (
         <p className="mt-2 rounded-lg bg-amber-50 px-3 py-1.5 text-xs text-amber-700">{row.note}</p>
       )}
-      {row.error && (
-        <p className="mt-2 rounded-lg bg-rose-50 px-3 py-1.5 text-xs text-rose-700">{row.error}</p>
-      )}
+      {row.error && <p className="mt-2 rounded-lg bg-rose-50 px-3 py-1.5 text-xs text-rose-700">{row.error}</p>}
 
-      {/* Preview vài sản phẩm đầu */}
-      {row.status === 'done' && row.products && row.products.length > 0 && (
-        <details className="mt-3 group">
+      {row.products && row.products.length > 0 && (
+        <details className="mt-3">
           <summary className="cursor-pointer text-xs font-medium text-indigo-600 hover:underline">
             Xem trước {Math.min(5, row.products.length)} sản phẩm
           </summary>
@@ -353,8 +462,8 @@ function SiteCard({ row }: { row: Row }) {
                 <tr>
                   <th className="py-1 pr-3 font-medium">Mã</th>
                   <th className="py-1 pr-3 font-medium">Tên</th>
-                  <th className="py-1 pr-3 font-medium text-right">Giá gốc</th>
-                  <th className="py-1 font-medium text-right">Giá bán</th>
+                  <th className="py-1 pr-3 text-right font-medium">Giá gốc</th>
+                  <th className="py-1 text-right font-medium">Giá bán</th>
                 </tr>
               </thead>
               <tbody className="text-slate-600">
@@ -363,7 +472,7 @@ function SiteCard({ row }: { row: Row }) {
                     <td className="py-1 pr-3 font-mono text-[11px] text-slate-400">{p.code || '—'}</td>
                     <td className="max-w-xs truncate py-1 pr-3">{p.name}</td>
                     <td className="py-1 pr-3 text-right text-slate-400 line-through">
-                      {p.originalPrice ? p.originalPrice.toLocaleString('vi-VN') : ''}
+                      {p.originalPrice && p.originalPrice !== p.salePrice ? p.originalPrice.toLocaleString('vi-VN') : ''}
                     </td>
                     <td className="py-1 text-right font-semibold text-rose-600">
                       {p.salePrice ? p.salePrice.toLocaleString('vi-VN') : ''}

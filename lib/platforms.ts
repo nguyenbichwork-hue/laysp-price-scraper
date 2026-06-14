@@ -1,129 +1,13 @@
-// Phát hiện nền tảng website và lấy TOÀN BỘ sản phẩm bằng nguồn dữ liệu có cấu trúc.
-// Đây là cách chính xác & ít bị chặn nhất cho web hãng/cửa hàng tại VN.
+// Phát hiện nền tảng + lấy sản phẩm theo từng vòng (resumable).
+// Mỗi hàm chỉ làm 1 chunk công việc (<=~45s) rồi trả về để client gọi vòng tiếp.
 
-import type { Product, Platform } from './types';
+import * as cheerio from 'cheerio';
+import type { Product } from './types';
 import { smartFetch, fetchJson } from './fetcher';
 import { parsePrice } from './price';
-import { extractProductsFromHtml } from './extractor';
+import { extractProductsFromHtml, extractListing } from './extractor';
 
-export interface PlatformResult {
-  platform: Platform;
-  products: Product[];
-  note?: string;
-}
-
-// ----- Shopify / Haravan / Sapo: endpoint /products.json -----
-// Cả 3 nền tảng (rất phổ biến ở VN) đều expose /products.json?limit=250&page=N
-export async function tryShopifyLike(
-  origin: string,
-  maxProducts: number,
-  deadline: number,
-): Promise<PlatformResult | null> {
-  const products: Product[] = [];
-  let detected: Platform = 'shopify';
-
-  for (let page = 1; page <= 50; page++) {
-    if (Date.now() > deadline || products.length >= maxProducts) break;
-    const data = await fetchJson<any>(`${origin}/products.json?limit=250&page=${page}`, {
-      timeoutMs: 15000,
-      retries: 2,
-    });
-    if (!data || !Array.isArray(data.products)) {
-      if (page === 1) return null; // không phải nền tảng này
-      break;
-    }
-    if (data.products.length === 0) break;
-
-    for (const p of data.products) {
-      const variants = Array.isArray(p.variants) && p.variants.length ? p.variants : [{}];
-      // Mỗi biến thể là một dòng (giá có thể khác nhau)
-      for (const v of variants) {
-        const sale = parsePrice(v.price);
-        const original = parsePrice(v.compare_at_price);
-        const handle = p.handle || '';
-        const variantSuffix = variants.length > 1 && v.title && v.title !== 'Default Title' ? ` - ${v.title}` : '';
-        products.push({
-          code: (v.sku || handle || String(v.id || p.id || '')).toString().trim(),
-          name: (p.title || '').toString().trim() + variantSuffix,
-          salePrice: sale,
-          originalPrice: original && original > 0 ? original : sale,
-          currency: 'VND',
-          url: handle ? `${origin}/products/${handle}` : origin,
-        });
-        if (products.length >= maxProducts) break;
-      }
-      if (products.length >= maxProducts) break;
-    }
-    if (data.products.length < 250) break;
-  }
-
-  if (products.length === 0) return null;
-
-  // Nhận diện chi tiết nền tảng để ghi chú
-  const note =
-    products.length >= maxProducts ? `Đã giới hạn ${maxProducts} dòng đầu tiên.` : undefined;
-  return { platform: detected, products, note };
-}
-
-// ----- WooCommerce: Store API (không cần auth) -----
-export async function tryWooCommerce(
-  origin: string,
-  maxProducts: number,
-  deadline: number,
-): Promise<PlatformResult | null> {
-  const endpoints = [`${origin}/wp-json/wc/store/v1/products`, `${origin}/wp-json/wc/store/products`];
-  for (const base of endpoints) {
-    const products: Product[] = [];
-    let worked = false;
-    for (let page = 1; page <= 50; page++) {
-      if (Date.now() > deadline || products.length >= maxProducts) break;
-      const data = await fetchJson<any[]>(`${base}?per_page=100&page=${page}`, {
-        timeoutMs: 15000,
-        retries: 2,
-      });
-      if (!Array.isArray(data)) break;
-      worked = true;
-      if (data.length === 0) break;
-      for (const p of data) {
-        const prices = p.prices || {};
-        const minor = Number(prices.currency_minor_unit ?? 0);
-        const div = Math.pow(10, minor) || 1;
-        const regular = prices.regular_price ? Number(prices.regular_price) / div : null;
-        const saleRaw = prices.sale_price ? Number(prices.sale_price) / div : null;
-        const cur = prices.price ? Number(prices.price) / div : null;
-        const sale = saleRaw && saleRaw > 0 ? saleRaw : cur;
-        products.push({
-          code: (p.sku || String(p.id || '')).toString().trim(),
-          name: (p.name || '').toString().trim(),
-          salePrice: sale,
-          originalPrice: regular && regular > 0 ? regular : sale,
-          currency: prices.currency_code || 'VND',
-          url: p.permalink || origin,
-        });
-        if (products.length >= maxProducts) break;
-      }
-      if (data.length < 100) break;
-    }
-    if (worked && products.length > 0) {
-      const note = products.length >= maxProducts ? `Đã giới hạn ${maxProducts} dòng đầu tiên.` : undefined;
-      return { platform: 'woocommerce', products, note };
-    }
-  }
-  return null;
-}
-
-// ----- Sitemap.xml -> thu thập URL sản phẩm -> bóc tách từng trang -----
-function extractLocs(xml: string): string[] {
-  const locs: string[] = [];
-  const re = /<loc>\s*([^<\s]+)\s*<\/loc>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(xml)) !== null) locs.push(m[1].trim());
-  return locs;
-}
-
-const PRODUCT_URL_HINTS = /(\/product\/|\/products\/|\/san-pham\/|\/p\/|\/sp\/|-p\d+|\/dp\/|\.html)/i;
-
-function normUrlLocal(u: string): string {
+export function normUrlLocal(u: string): string {
   try {
     const x = new URL(u);
     return (x.origin + x.pathname).replace(/\/+$/, '').toLowerCase();
@@ -132,27 +16,147 @@ function normUrlLocal(u: string): string {
   }
 }
 
-/** Lấy các link cùng domain trên một trang HTML (dùng để nhận diện menu/danh mục). */
-export function extractInternalLinks(html: string, origin: string): Set<string> {
-  const set = new Set<string>();
-  const re = /href\s*=\s*["']([^"']+)["']/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) !== null) {
-    const href = m[1];
-    if (!href || href.startsWith('#') || href.startsWith('javascript:') || href.startsWith('mailto:')) continue;
+const PRODUCT_URL_HINTS = /(\/product\/|\/products\/|\/san-pham\/|\/p\/|\/sp\/|-p\d+|\/dp\/|\.html)/i;
+
+// ============ Shopify / Haravan / Sapo : /products.json ============
+export async function shopifyPage(origin: string, page: number, maxProducts: number): Promise<{ products: Product[]; hasMore: boolean }> {
+  const data = await fetchJson<any>(`${origin}/products.json?limit=250&page=${page}`, { timeoutMs: 15000, retries: 2 });
+  if (!data || !Array.isArray(data.products) || data.products.length === 0) return { products: [], hasMore: false };
+  const products: Product[] = [];
+  for (const p of data.products) {
+    const variants = Array.isArray(p.variants) && p.variants.length ? p.variants : [{}];
+    // Gộp biến thể: 1 sản phẩm = 1 dòng, lấy giá thấp nhất
+    let sale: number | null = null;
+    let original: number | null = null;
+    for (const v of variants) {
+      const s = parsePrice(v.price);
+      if (s != null && (sale == null || s < sale)) sale = s;
+      const o = parsePrice(v.compare_at_price);
+      if (o != null && o > 0 && (original == null || o < original)) original = o;
+    }
+    const handle = p.handle || '';
+    const firstSku = (variants.find((v: any) => v.sku) || {}).sku || '';
+    products.push({
+      code: (firstSku || handle || String(p.id || '')).toString().trim(),
+      name: (p.title || '').toString().trim(),
+      salePrice: sale,
+      originalPrice: original != null && original > (sale ?? 0) ? original : sale,
+      currency: 'VND',
+      url: handle ? `${origin}/products/${handle}` : origin,
+    });
+    if (products.length >= maxProducts) break;
+  }
+  return { products, hasMore: data.products.length >= 250 };
+}
+
+// ============ WooCommerce Store API ============
+export async function wooPage(
+  origin: string,
+  page: number,
+): Promise<{ products: Product[]; hasMore: boolean; total: number | null } | null> {
+  const bases = [`${origin}/wp-json/wc/store/v1/products`, `${origin}/wp-json/wc/store/products`];
+  for (const base of bases) {
+    const res = await smartFetch(`${base}?per_page=100&page=${page}`, { accept: 'json', timeoutMs: 15000, retries: 2 });
+    if (!res.ok || !res.text) continue;
+    let data: any;
     try {
-      const abs = new URL(href, origin).href;
-      if (new URL(abs).origin === origin) set.add(normUrlLocal(abs));
+      data = JSON.parse(res.text);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(data)) continue;
+    const products: Product[] = [];
+    for (const p of data) {
+      const prices = p.prices || {};
+      const minor = Number(prices.currency_minor_unit ?? 0);
+      const div = Math.pow(10, minor) || 1;
+      const regular = prices.regular_price ? Number(prices.regular_price) / div : null;
+      const saleRaw = prices.sale_price ? Number(prices.sale_price) / div : null;
+      const cur = prices.price ? Number(prices.price) / div : null;
+      const sale = saleRaw && saleRaw > 0 ? saleRaw : cur;
+      products.push({
+        code: (p.sku || String(p.id || '')).toString().trim(),
+        name: (p.name || '').toString().trim(),
+        salePrice: sale,
+        originalPrice: regular && regular > 0 ? regular : sale,
+        currency: prices.currency_code || 'VND',
+        url: p.permalink || origin,
+      });
+    }
+    return { products, hasMore: data.length >= 100, total: null };
+  }
+  return null;
+}
+
+// ============ Menu/danh mục từ trang chủ ============
+export function getMenuLinks(html: string, origin: string, max = 400): string[] {
+  const $ = cheerio.load(html);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const sel =
+    'nav a[href], header a[href], footer a[href], [class*="menu" i] a[href], [class*="nav" i] a[href], [class*="danh-muc" i] a[href], [class*="category" i] a[href], [class*="collection" i] a[href]';
+  $(sel).each((_, a) => {
+    const href = $(a).attr('href') || '';
+    if (!href || /^(#|javascript:|mailto:|tel:)/i.test(href)) return;
+    try {
+      const abs = new URL(href, origin);
+      if (abs.origin !== origin) return;
+      const key = normUrlLocal(abs.href);
+      if (key === normUrlLocal(origin) || seen.has(key)) return;
+      // bỏ link tài khoản/giỏ hàng/bài viết
+      if (/(\/cart|\/gio-hang|\/account|\/tai-khoan|\/login|\/dang-nhap|\/blog|\/tin-tuc|\/news|\/lien-he|\/contact|\/gioi-thieu|\/about)/i.test(abs.pathname))
+        return;
+      seen.add(key);
+      out.push(abs.href.split('#')[0]);
     } catch {
       /* ignore */
     }
-  }
-  return set;
+  });
+  return out.slice(0, max);
 }
 
-// Sắp xếp URL: trang sản phẩm (không nằm trong menu trang chủ) lên trước,
-// trang danh mục/menu xuống sau -> tận dụng thời gian crawl hiệu quả hơn.
-function prioritizeUrls(urls: string[], origin: string, navSet: Set<string>, max: number): string[] {
+// ============ Sitemap -> danh sách URL sản phẩm (không tự crawl) ============
+function extractLocs(xml: string): string[] {
+  const locs: string[] = [];
+  const re = /<loc>\s*([^<\s]+)\s*<\/loc>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) locs.push(m[1].trim());
+  return locs;
+}
+
+export async function collectSitemapUrls(origin: string, deadline: number): Promise<string[]> {
+  const candidates = [
+    `${origin}/sitemap.xml`,
+    `${origin}/sitemap_index.xml`,
+    `${origin}/product-sitemap.xml`,
+    `${origin}/sitemap-products.xml`,
+    `${origin}/sitemap/sitemap.xml`,
+  ];
+  let urls: string[] = [];
+  for (const sm of candidates) {
+    if (Date.now() > deadline) break;
+    const res = await smartFetch(sm, { accept: 'xml', timeoutMs: 15000, retries: 1 });
+    if (!res.ok || !res.text.includes('<loc>')) continue;
+    const locs = extractLocs(res.text);
+    if (res.text.includes('<sitemapindex')) {
+      const children = locs
+        .filter((l) => /\.xml($|\?)/i.test(l))
+        .sort((a, b) => (/(product|san-pham|sp)/i.test(a) ? 0 : 1) - (/(product|san-pham|sp)/i.test(b) ? 0 : 1));
+      for (const child of children.slice(0, 20)) {
+        if (Date.now() > deadline || urls.length > 20000) break;
+        const cres = await smartFetch(child, { accept: 'xml', timeoutMs: 15000, retries: 1 });
+        if (cres.ok) urls.push(...extractLocs(cres.text).filter((l) => !/\.xml($|\?)/i.test(l)));
+      }
+    } else {
+      urls.push(...locs.filter((l) => !/\.xml($|\?)/i.test(l)));
+    }
+    if (urls.length > 0) break;
+  }
+  return urls;
+}
+
+/** Ưu tiên URL sản phẩm (không nằm trong menu), loại trùng. */
+export function prioritizeProductUrls(urls: string[], origin: string, navSet: Set<string>, max: number): string[] {
   const homeNorm = normUrlLocal(origin);
   const seen = new Set<string>();
   const uniq: string[] = [];
@@ -164,115 +168,120 @@ function prioritizeUrls(urls: string[], origin: string, navSet: Set<string>, max
   }
   const scored = uniq.map((u) => {
     let rank = PRODUCT_URL_HINTS.test(u) ? 0 : 1;
-    if (navSet.has(normUrlLocal(u))) rank += 3; // có trong menu -> nhiều khả năng là danh mục
+    if (navSet.has(normUrlLocal(u))) rank += 3;
     return { u, rank };
   });
   scored.sort((a, b) => a.rank - b.rank);
   return scored.slice(0, max).map((s) => s.u);
 }
 
-export async function trySitemap(
-  origin: string,
-  maxProducts: number,
-  deadline: number,
-  concurrency: number,
-  navSet: Set<string> = new Set(),
-): Promise<PlatformResult | null> {
-  const candidates = [
-    `${origin}/sitemap.xml`,
-    `${origin}/sitemap_index.xml`,
-    `${origin}/product-sitemap.xml`,
-    `${origin}/sitemap-products.xml`,
-  ];
-  let productUrls: string[] = [];
-
-  for (const sm of candidates) {
-    if (Date.now() > deadline) break;
-    const res = await smartFetch(sm, { accept: 'xml', timeoutMs: 15000, retries: 2 });
-    if (!res.ok || !res.text.includes('<loc>')) continue;
-    let locs = extractLocs(res.text);
-
-    // Nếu là sitemap index -> mở các sitemap con có vẻ chứa sản phẩm
-    const childSitemaps = locs.filter((l) => /\.xml($|\?)/i.test(l));
-    if (childSitemaps.length && res.text.includes('<sitemapindex')) {
-      const prioritized = childSitemaps.sort((a, b) => {
-        const pa = /product|san-pham|sp/i.test(a) ? 0 : 1;
-        const pb = /product|san-pham|sp/i.test(b) ? 0 : 1;
-        return pa - pb;
-      });
-      for (const child of prioritized.slice(0, 15)) {
-        if (Date.now() > deadline || productUrls.length >= maxProducts) break;
-        const cres = await smartFetch(child, { accept: 'xml', timeoutMs: 15000, retries: 1 });
-        if (!cres.ok) continue;
-        const childLocs = extractLocs(cres.text).filter((l) => !/\.xml($|\?)/i.test(l));
-        productUrls.push(...childLocs);
-      }
-    } else {
-      productUrls.push(...locs.filter((l) => !/\.xml($|\?)/i.test(l)));
-    }
-    if (productUrls.length > 0) break;
-  }
-
-  if (productUrls.length === 0) return null;
-
-  const totalFound = new Set(productUrls.map(normUrlLocal)).size;
-  // Ưu tiên trang sản phẩm (không nằm trong menu trang chủ) lên trước
-  const chosen = prioritizeUrls(productUrls, origin, navSet, maxProducts);
-
-  const products = await crawlUrls(chosen, deadline, concurrency);
-  if (products.length === 0) return null;
-  const note =
-    totalFound > products.length
-      ? `Sitemap có ${totalFound} URL; đã lấy ${products.length} sản phẩm trong giới hạn thời gian (tăng "Giới hạn SP/web" hoặc chạy lại để lấy thêm).`
-      : undefined;
-  return { platform: 'sitemap', products, note };
-}
-
-// ----- Fallback: quét link sản phẩm ngay trên trang chủ -----
-export async function tryHomepageLinks(
-  origin: string,
-  homepageHtml: string,
-  maxProducts: number,
-  deadline: number,
-  concurrency: number,
-): Promise<PlatformResult | null> {
-  const urls = new Set<string>();
-  const re = /href\s*=\s*["']([^"']+)["']/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(homepageHtml)) !== null) {
-    let href = m[1];
-    if (!href || href.startsWith('#') || href.startsWith('javascript:') || href.startsWith('mailto:')) continue;
-    try {
-      const abs = new URL(href, origin).href;
-      if (new URL(abs).origin !== origin) continue; // chỉ cùng domain
-      if (PRODUCT_URL_HINTS.test(abs)) urls.add(abs.split('#')[0]);
-    } catch {
-      /* ignore */
-    }
-  }
-  const chosen = Array.from(urls).slice(0, maxProducts);
-  if (chosen.length === 0) return null;
-  const products = await crawlUrls(chosen, deadline, concurrency);
-  if (products.length === 0) return null;
-  return { platform: 'homepage-links', products, note: `Lấy từ ${products.length} link sản phẩm trên trang chủ.` };
-}
-
-// Crawl nhiều URL trang sản phẩm với giới hạn concurrency + deadline
-async function crawlUrls(urls: string[], deadline: number, concurrency: number): Promise<Product[]> {
-  const out: Product[] = [];
+// ============ Worker pool fetch + extract ============
+async function pool<T>(items: T[], concurrency: number, deadline: number, fn: (item: T) => Promise<void>): Promise<void> {
   let idx = 0;
-  async function worker() {
-    while (idx < urls.length) {
+  const worker = async () => {
+    while (idx < items.length) {
       const i = idx++;
       if (Date.now() > deadline) return;
-      const url = urls[i];
-      const res = await smartFetch(url, { accept: 'html', timeoutMs: 15000, retries: 1 });
-      if (!res.ok) continue;
-      const prods = extractProductsFromHtml(res.text, url);
-      out.push(...prods);
+      try {
+        await fn(items[i]);
+      } catch {
+        /* bỏ qua item lỗi */
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+}
+
+function nextPageUrl(url: string, html: string): string | null {
+  const $ = cheerio.load(html);
+  const rel = $('a[rel="next"]').attr('href') || $('link[rel="next"]').attr('href');
+  if (rel) {
+    try {
+      return new URL(rel, url).href;
+    } catch {
+      /* fall through */
     }
   }
-  const workers = Array.from({ length: Math.min(concurrency, urls.length) }, () => worker());
-  await Promise.all(workers);
-  return out;
+  try {
+    const u = new URL(url);
+    const cur = parseInt(u.searchParams.get('page') || '1', 10);
+    if (cur >= 50) return null; // chặn vòng lặp vô hạn
+    u.searchParams.set('page', String(cur + 1));
+    return u.href;
+  } catch {
+    return null;
+  }
+}
+
+/** Xử lý lô URL danh mục (listing): bóc nhiều SP/trang + đề xuất trang kế. */
+export async function processListingUrls(
+  urls: string[],
+  deadline: number,
+  concurrency: number,
+): Promise<{ products: Product[]; enqueueUrls: string[] }> {
+  const products: Product[] = [];
+  const enqueue: string[] = [];
+  await pool(urls, concurrency, deadline, async (url) => {
+    const res = await smartFetch(url, { accept: 'html', timeoutMs: 15000, retries: 1 });
+    if (!res.ok) return;
+    const items = extractListing(res.text, url);
+    if (items.length) products.push(...items);
+    if (items.length >= 8) {
+      const np = nextPageUrl(url, res.text);
+      if (np) enqueue.push(np);
+    }
+  });
+  return { products, enqueueUrls: enqueue };
+}
+
+/** Lọc bỏ sản phẩm có giá phi lý (trang danh mục lọt vào, số rác). */
+function sane(p: Product): boolean {
+  const s = p.salePrice ?? p.originalPrice;
+  if (s == null || s < 1000 || s > 5e10) return false;
+  if (p.salePrice != null && p.originalPrice != null && p.originalPrice > p.salePrice * 30) return false;
+  return true;
+}
+
+/** Xử lý lô URL trang chi tiết (strict: chỉ dữ liệu có cấu trúc). */
+export async function processDetailUrls(urls: string[], deadline: number, concurrency: number): Promise<Product[]> {
+  const products: Product[] = [];
+  await pool(urls, concurrency, deadline, async (url) => {
+    const res = await smartFetch(url, { accept: 'html', timeoutMs: 15000, retries: 1 });
+    if (!res.ok) return;
+    for (const p of extractProductsFromHtml(res.text, url, true)) {
+      if (sane(p)) products.push(p);
+    }
+  });
+  return products;
+}
+
+/**
+ * Chế độ AUTO (chính xác + nhanh):
+ *  - Trang danh mục (extractListing thấy >=6 card) -> CHỈ thu thập URL sản phẩm + trang kế (KHÔNG lấy giá listing).
+ *  - Trang chi tiết -> lấy giá chính xác từ JSON-LD (strict).
+ * Nhờ đó giá luôn từ trang chi tiết, còn URL sản phẩm được "trải" ra từ trang danh mục.
+ */
+export async function processAutoUrls(
+  urls: string[],
+  deadline: number,
+  concurrency: number,
+): Promise<{ products: Product[]; enqueueUrls: string[] }> {
+  const products: Product[] = [];
+  const enqueue: string[] = [];
+  await pool(urls, concurrency, deadline, async (url) => {
+    const res = await smartFetch(url, { accept: 'html', timeoutMs: 15000, retries: 1 });
+    if (!res.ok) return;
+    // Lấy sản phẩm của chính trang (nếu là trang chi tiết)
+    for (const p of extractProductsFromHtml(res.text, url, true)) {
+      if (sane(p)) products.push(p);
+    }
+    // Nếu là trang danh mục -> thu URL sản phẩm + trang kế để fetch chi tiết sau
+    const listing = extractListing(res.text, url);
+    if (listing.length >= 6) {
+      for (const it of listing) enqueue.push(it.url);
+      const np = nextPageUrl(url, res.text);
+      if (np) enqueue.push(np);
+    }
+  });
+  return { products, enqueueUrls: enqueue };
 }
