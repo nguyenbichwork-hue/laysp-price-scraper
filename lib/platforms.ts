@@ -4,7 +4,7 @@
 import * as cheerio from 'cheerio';
 import type { Product } from './types';
 import { smartFetch, fetchJson } from './fetcher';
-import { parsePrice } from './price';
+import { parsePrice, bestCode } from './price';
 import { extractProductsFromHtml, extractListing } from './extractor';
 
 export function normUrlLocal(u: string): string {
@@ -49,9 +49,10 @@ export async function shopifyPage(origin: string, page: number, maxProducts: num
     }
     const handle = p.handle || '';
     const firstSku = (variants.find((v: any) => v.sku) || {}).sku || '';
+    const title = (p.title || '').toString().trim();
     products.push({
-      code: (firstSku || handle || String(p.id || '')).toString().trim(),
-      name: (p.title || '').toString().trim(),
+      code: bestCode(firstSku, title, handle || String(p.id || '')),
+      name: title,
       salePrice: sale,
       originalPrice: original != null && original > (sale ?? 0) ? original : sale,
       currency: 'VND',
@@ -94,9 +95,10 @@ export async function wooPage(
       } catch {
         /* ignore */
       }
+      const wname = (p.name || '').toString().trim().replace(/&#?\w+;/g, (m: string) => decodeEntity(m));
       products.push({
-        code: (p.sku || slug || String(p.id || '')).toString().trim(),
-        name: (p.name || '').toString().trim().replace(/&#?\w+;/g, (m: string) => decodeEntity(m)),
+        code: bestCode(p.sku, wname, slug || String(p.id || '')),
+        name: wname,
         salePrice: sale,
         originalPrice: regular && regular > 0 ? regular : sale,
         currency: prices.currency_code || 'VND',
