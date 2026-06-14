@@ -32,3 +32,8 @@ yarn-error.log*
 *.tsbuildinfo
 
 .vercel
+
+# temp/test files
+_*.js
+_*.html
+_*.xlsx
