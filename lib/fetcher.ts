@@ -67,6 +67,8 @@ export interface FetchOptions {
   timeoutMs?: number;
   retries?: number;
   render?: boolean;
+  /** false = không thử proxy khi bị chặn (dùng cho bước dò nền tảng, tiết kiệm credit) */
+  proxyFallback?: boolean;
 }
 
 export interface FetchResult {
@@ -159,7 +161,7 @@ export async function smartFetch(url: string, opts: FetchOptions = {}): Promise<
   // Chỉ proxy khi bị CHẶN thật (mất kết nối/403/429/5xx/CAPTCHA), không proxy 404/200
   const blockedDirect =
     direct.status === 0 || direct.blocked || direct.status === 403 || direct.status === 429 || direct.status >= 500;
-  if (!hasKey || !blockedDirect) return direct;
+  if (!hasKey || !blockedDirect || opts.proxyFallback === false) return direct;
   // Trực tiếp bị chặn/lỗi -> thử qua proxy (timeout cao hơn vì proxy chậm)
   const proxied = await fetchAttempts(
     url,

@@ -33,7 +33,11 @@ function decodeEntity(m: string): string {
 
 // ============ Shopify / Haravan / Sapo : /products.json ============
 export async function shopifyPage(origin: string, page: number, maxProducts: number): Promise<{ products: Product[]; hasMore: boolean }> {
-  const data = await fetchJson<any>(`${origin}/products.json?limit=250&page=${page}`, { timeoutMs: 15000, retries: 2 });
+  const data = await fetchJson<any>(`${origin}/products.json?limit=250&page=${page}`, {
+    timeoutMs: 15000,
+    retries: 2,
+    proxyFallback: false,
+  });
   if (!data || !Array.isArray(data.products) || data.products.length === 0) return { products: [], hasMore: false };
   const products: Product[] = [];
   for (const p of data.products) {
@@ -70,7 +74,12 @@ export async function wooPage(
 ): Promise<{ products: Product[]; hasMore: boolean; total: number | null } | null> {
   const bases = [`${origin}/wp-json/wc/store/v1/products`, `${origin}/wp-json/wc/store/products`];
   for (const base of bases) {
-    const res = await smartFetch(`${base}?per_page=100&page=${page}`, { accept: 'json', timeoutMs: 15000, retries: 2 });
+    const res = await smartFetch(`${base}?per_page=100&page=${page}`, {
+      accept: 'json',
+      timeoutMs: 15000,
+      retries: 2,
+      proxyFallback: false,
+    });
     if (!res.ok || !res.text) continue;
     let data: any;
     try {
@@ -157,7 +166,7 @@ export async function collectSitemapUrls(origin: string, deadline: number): Prom
   let urls: string[] = [];
   for (const sm of candidates) {
     if (Date.now() > deadline) break;
-    const res = await smartFetch(sm, { accept: 'xml', timeoutMs: 15000, retries: 1 });
+    const res = await smartFetch(sm, { accept: 'xml', timeoutMs: 15000, retries: 1, proxyFallback: false });
     if (!res.ok || !res.text.includes('<loc>')) continue;
     const locs = extractLocs(res.text);
     if (res.text.includes('<sitemapindex')) {
