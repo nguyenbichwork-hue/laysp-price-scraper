@@ -138,15 +138,19 @@ export default function Home() {
 
       // ---- API mode (Shopify/Haravan/Sapo, WooCommerce) ----
       if (disc.mode === 'api') {
-        let task: Task | null = disc.task || null;
+        let api: { kind: 'shopify' | 'woo'; page: number } | null = disc.task || null;
         let rounds = 0;
-        while (task && !stopRef.current && products.length < maxProducts && rounds < MAX_ROUNDS) {
+        while (api && !stopRef.current && products.length < maxProducts && rounds < MAX_ROUNDS) {
           rounds++;
           patchRow(i, { phase: `Đang tải sản phẩm… (${products.length})` });
-          const r = await callApi(url, task);
-          addAll(r.products);
-          patchRow(i, { products: [...products], count: products.length });
-          task = r.task || null;
+          try {
+            const r = await callApi(url, { strategy: 'api', kind: api.kind, page: api.page });
+            addAll(r.products);
+            patchRow(i, { products: [...products], count: products.length });
+            api = r.task || null;
+          } catch {
+            break; // lỗi vòng -> dừng phân trang, giữ phần đã có
+          }
         }
       }
 

@@ -18,6 +18,19 @@ export function normUrlLocal(u: string): string {
 
 const PRODUCT_URL_HINTS = /(\/product\/|\/products\/|\/san-pham\/|\/p\/|\/sp\/|-p\d+|\/dp\/|\.html)/i;
 
+const NAMED_ENTITIES: Record<string, string> = {
+  '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'", '&apos;': "'", '&nbsp;': ' ',
+};
+// Giải mã HTML entity trong chuỗi (tên SP từ WooCommerce hay chứa &#8211; &amp; ...)
+function decodeEntity(m: string): string {
+  if (NAMED_ENTITIES[m]) return NAMED_ENTITIES[m];
+  const num = m.match(/^&#(\d+);$/);
+  if (num) return String.fromCodePoint(parseInt(num[1], 10));
+  const hex = m.match(/^&#x([0-9a-f]+);$/i);
+  if (hex) return String.fromCodePoint(parseInt(hex[1], 16));
+  return m;
+}
+
 // ============ Shopify / Haravan / Sapo : /products.json ============
 export async function shopifyPage(origin: string, page: number, maxProducts: number): Promise<{ products: Product[]; hasMore: boolean }> {
   const data = await fetchJson<any>(`${origin}/products.json?limit=250&page=${page}`, { timeoutMs: 15000, retries: 2 });
@@ -74,9 +87,16 @@ export async function wooPage(
       const saleRaw = prices.sale_price ? Number(prices.sale_price) / div : null;
       const cur = prices.price ? Number(prices.price) / div : null;
       const sale = saleRaw && saleRaw > 0 ? saleRaw : cur;
+      // Mã: ưu tiên SKU; nếu trống dùng slug từ permalink (dễ đọc hơn id số)
+      let slug = '';
+      try {
+        slug = new URL(p.permalink).pathname.split('/').filter(Boolean).pop() || '';
+      } catch {
+        /* ignore */
+      }
       products.push({
-        code: (p.sku || String(p.id || '')).toString().trim(),
-        name: (p.name || '').toString().trim(),
+        code: (p.sku || slug || String(p.id || '')).toString().trim(),
+        name: (p.name || '').toString().trim().replace(/&#?\w+;/g, (m: string) => decodeEntity(m)),
         salePrice: sale,
         originalPrice: regular && regular > 0 ? regular : sale,
         currency: prices.currency_code || 'VND',

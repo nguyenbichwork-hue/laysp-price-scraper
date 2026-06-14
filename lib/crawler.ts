@@ -154,6 +154,10 @@ export async function runTask(inputUrl: string, task: Task, cfgPartial: Partial<
     return { products: [], error: 'URL không hợp lệ' };
   }
 
+  // Phòng vệ: task api có thể bị thiếu 'strategy' (chỉ có kind/page)
+  const t: any = task;
+  if (!t.strategy && t.kind) t.strategy = 'api';
+
   try {
     if (task.strategy === 'api') {
       const out: Product[] = [];
