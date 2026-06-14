@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { discover, runTask } from '@/lib/crawler';
+import { authGuard } from '@/lib/auth';
 import type { Task } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -7,6 +8,9 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 60; // giây
 
 export async function POST(req: NextRequest) {
+  const denied = authGuard(req);
+  if (denied) return denied;
+
   let body: any;
   try {
     body = await req.json();

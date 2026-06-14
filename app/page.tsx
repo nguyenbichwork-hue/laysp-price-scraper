@@ -1,516 +1,100 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { ToastProvider } from '@/components/common';
+import Login from '@/components/Login';
+import Scraper, { type SRow } from '@/components/Scraper';
+import MyProducts from '@/components/MyProducts';
+import Dashboard from '@/components/Dashboard';
+import type { MyProduct } from '@/lib/types';
 
-interface Product {
-  code: string;
-  name: string;
-  originalPrice: number | null;
-  salePrice: number | null;
-  currency: string;
-  url: string;
-}
-type Task =
-  | { strategy: 'api'; kind: 'shopify' | 'woo'; page: number }
-  | { strategy: 'fetchUrls'; mode: 'detail' | 'listing' | 'auto'; urls: string[] };
+type Tab = 'mine' | 'scan' | 'compare';
 
-type Status = 'pending' | 'running' | 'done' | 'error';
-
-interface Row {
-  input: string;
-  status: Status;
-  siteName?: string;
-  platform?: string;
-  products: Product[];
-  count: number;
-  total?: number | null;
-  note?: string;
-  error?: string;
-  needsRender?: boolean;
-  phase?: string; // mô tả đang làm gì
-}
-
-const PLATFORM_LABEL: Record<string, string> = {
-  shopify: 'Shopify/Haravan/Sapo',
-  woocommerce: 'WooCommerce',
-  'listing-pages': 'Trang danh mục',
-  sitemap: 'Sitemap',
-  'homepage-links': 'Quét trang chủ',
-  'spa-state': 'SPA (dữ liệu nhúng)',
-  'single-page': 'Trang đơn',
-  unknown: 'Không rõ',
-};
-
-const SITE_CONCURRENCY = 3;
-const LISTING_BATCH = 14;
-const DETAIL_BATCH = 56;
-const MAX_ROUNDS = 400;
-
-function normU(u: string): string {
-  try {
-    const x = new URL(u);
-    return (x.origin + x.pathname).replace(/\/+$/, '').toLowerCase();
-  } catch {
-    return (u || '').toLowerCase();
-  }
-}
-function keyOf(p: Product): string {
-  const u = p.url ? normU(p.url) : '';
-  return u || 'n:' + p.name.toLowerCase() + '|' + (p.salePrice ?? '');
-}
+const TABS: { id: Tab; label: string; icon: string }[] = [
+  { id: 'mine', label: 'Sản phẩm của tôi', icon: '🏬' },
+  { id: 'scan', label: 'Quét thị trường', icon: '🔎' },
+  { id: 'compare', label: 'Đối chiếu & Định giá', icon: '⚖️' },
+];
 
 export default function Home() {
-  const [text, setText] = useState('');
-  const [maxProducts, setMaxProducts] = useState(2000);
-  const [rows, setRows] = useState<Row[]>([]);
-  const [running, setRunning] = useState(false);
-  const [downloading, setDownloading] = useState(false);
-  const stopRef = useRef(false);
+  const [authed, setAuthed] = useState(false);
+  const [password, setPassword] = useState('');
+  const [tab, setTab] = useState<Tab>('mine');
+  const [myProducts, setMyProducts] = useState<MyProduct[]>([]);
+  const [scrapeRows, setScrapeRows] = useState<SRow[]>([]);
 
-  const urls = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          text
-            .split(/\r?\n/)
-            .map((l) => l.trim())
-            .filter(Boolean),
-        ),
-      ),
-    [text],
-  );
-
-  const done = rows.length > 0 && rows.every((r) => r.status === 'done' || r.status === 'error');
-  const totalProducts = rows.reduce((s, r) => s + (r.count || 0), 0);
-  const okSites = rows.filter((r) => r.status === 'done').length;
-  const finished = rows.filter((r) => r.status === 'done' || r.status === 'error').length;
-  const progress = rows.length ? Math.round((finished / rows.length) * 100) : 0;
-
-  function patchRow(i: number, patch: Partial<Row>) {
-    setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
-  }
-
-  async function callApi(url: string, task?: Task, retries = 2): Promise<any> {
-    let lastErr: any = null;
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        const res = await fetch('/api/scrape', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, maxProducts, task }),
-        });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return await res.json(); // có thể ném nếu body không phải JSON (lỗi nền tảng)
-      } catch (e) {
-        lastErr = e;
-        if (attempt < retries) await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
-      }
-    }
-    throw lastErr;
-  }
-
-  async function runSite(i: number, url: string) {
-    patchRow(i, { status: 'running', phase: 'Đang dò nền tảng…' });
-    const products: Product[] = [];
-    const seen = new Set<string>();
-    const addAll = (arr: Product[]): number => {
-      let added = 0;
-      for (const p of arr || []) {
-        const k = keyOf(p);
-        if (seen.has(k)) continue;
-        seen.add(k);
-        products.push(p);
-        added++;
-      }
-      return added;
-    };
-
+  useEffect(() => {
     try {
-      const disc = await callApi(url);
-      patchRow(i, { siteName: disc.siteName, platform: disc.platform, note: disc.note, needsRender: disc.needsRender });
-      addAll(disc.products);
-      patchRow(i, { products: [...products], count: products.length, total: disc.total ?? undefined, phase: phaseText(disc.platform) });
-
-      if (disc.error && products.length === 0) {
-        patchRow(i, { status: 'error', error: disc.error, phase: undefined });
-        return;
+      const pw = sessionStorage.getItem('app_pw');
+      if (pw) {
+        setPassword(pw);
+        setAuthed(true);
       }
+    } catch {}
+  }, []);
 
-      // ---- API mode (Shopify/Haravan/Sapo, WooCommerce) ----
-      if (disc.mode === 'api') {
-        let api: { kind: 'shopify' | 'woo'; page: number } | null = disc.task || null;
-        let rounds = 0;
-        while (api && !stopRef.current && products.length < maxProducts && rounds < MAX_ROUNDS) {
-          rounds++;
-          patchRow(i, { phase: `Đang tải sản phẩm… (${products.length})` });
-          try {
-            const r = await callApi(url, { strategy: 'api', kind: api.kind, page: api.page });
-            addAll(r.products);
-            patchRow(i, { products: [...products], count: products.length });
-            api = r.task || null;
-          } catch {
-            break; // lỗi vòng -> dừng phân trang, giữ phần đã có
-          }
-        }
-      }
+  if (!authed) return <Login onAuthed={(pw) => { setPassword(pw); setAuthed(true); }} />;
 
-      // ---- URLs mode (auto / listing / detail) ----
-      else if (disc.mode === 'urls' && Array.isArray(disc.worklist)) {
-        const mode: 'auto' | 'listing' | 'detail' =
-          disc.urlMode === 'detail' ? 'detail' : disc.urlMode === 'listing' ? 'listing' : 'auto';
-        const batchSize = mode === 'listing' ? LISTING_BATCH : mode === 'detail' ? DETAIL_BATCH : 50;
-        const worklist: string[] = [];
-        const wlSeen = new Set<string>();
-        const enqueue = (us: string[]) => {
-          for (const u of us || []) {
-            const k = normU(u);
-            if (wlSeen.has(k)) continue;
-            wlSeen.add(k);
-            worklist.push(u);
-          }
-        };
-        enqueue(disc.worklist);
-
-        let pos = 0;
-        let rounds = 0;
-        let dry = 0;
-        while (pos < worklist.length && !stopRef.current && products.length < maxProducts && rounds < MAX_ROUNDS) {
-          rounds++;
-          const batch = worklist.slice(pos, pos + batchSize);
-          pos += batch.length;
-          const before = worklist.length;
-          patchRow(i, { phase: `Đang lấy… ${products.length} SP (đã quét ${pos}/${worklist.length} trang)` });
-          let added = 0;
-          try {
-            const r = await callApi(url, { strategy: 'fetchUrls', mode, urls: batch });
-            added = addAll(r.products);
-            if (r.enqueueUrls) enqueue(r.enqueueUrls);
-            patchRow(i, { products: [...products], count: products.length });
-          } catch {
-            // batch lỗi (server quá tải) -> bỏ qua, tiếp tục batch sau
-          }
-          const grew = worklist.length > before;
-          dry = added === 0 && !grew ? dry + 1 : 0;
-          if (dry >= 6 && pos >= worklist.length) break;
-        }
-      }
-
-      const stopped = stopRef.current;
-      const capped = products.length >= maxProducts;
-      let note = disc.note;
-      if (capped) note = `Đã đạt giới hạn ${maxProducts} SP (tăng giới hạn để lấy thêm).`;
-      else if (stopped) note = `Đã dừng theo yêu cầu (${products.length} SP).`;
-      patchRow(i, { status: 'done', count: products.length, products: [...products], note, phase: undefined });
-    } catch (e: any) {
-      patchRow(i, {
-        status: products.length ? 'done' : 'error',
-        count: products.length,
-        products: [...products],
-        error: products.length ? undefined : e?.message || 'Lỗi kết nối',
-        phase: undefined,
-      });
-    }
-  }
-
-  async function start() {
-    if (urls.length === 0 || running) return;
-    stopRef.current = false;
-    setRunning(true);
-    setRows(urls.map((u) => ({ input: u, status: 'pending', products: [], count: 0 })));
-
-    const queue = urls.map((u, i) => ({ u, i }));
-    let cursor = 0;
-    const worker = async () => {
-      while (cursor < queue.length && !stopRef.current) {
-        const { u, i } = queue[cursor++];
-        await runSite(i, u);
-      }
-      // nếu bị dừng, đánh dấu các site chưa chạy là done(rỗng)
-    };
-    await Promise.all(Array.from({ length: Math.min(SITE_CONCURRENCY, queue.length) }, () => worker()));
-    // đảm bảo không còn trạng thái pending/running treo
-    setRows((prev) => prev.map((r) => (r.status === 'pending' || r.status === 'running' ? { ...r, status: 'done', phase: undefined } : r)));
-    setRunning(false);
-  }
-
-  function stop() {
-    stopRef.current = true;
-  }
-
-  async function download() {
-    const sites = rows
-      .filter((r) => r.siteName || r.products.length)
-      .map((r) => ({
-        url: r.input,
-        siteName: r.siteName || r.input,
-        platform: r.platform || 'unknown',
-        products: r.products || [],
-        count: r.count || 0,
-        note: r.note,
-        error: r.error,
-      }));
-    if (sites.length === 0) return;
-    setDownloading(true);
-    try {
-      const res = await fetch('/api/excel', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sites }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        alert('Lỗi tạo Excel: ' + (err.error || res.status));
-        return;
-      }
-      const blob = await res.blob();
-      const a = document.createElement('a');
-      const objectUrl = URL.createObjectURL(blob);
-      a.href = objectUrl;
-      a.download = 'bang-gia-san-pham.xlsx';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(objectUrl);
-    } finally {
-      setDownloading(false);
-    }
-  }
-
-  function loadSample() {
-    setText(['https://allbirds.com', 'https://thienkimhome.com', 'https://www.vascara.com'].join('\n'));
-  }
+  const matchedHint = myProducts.length > 0 && scrapeRows.some((r) => r.products?.length);
 
   return (
-    <main className="mx-auto max-w-5xl px-4 py-8 sm:py-12">
-      <header className="mb-8 text-center">
-        <div className="mb-3 inline-flex items-center gap-2 rounded-full bg-white/70 px-4 py-1.5 text-xs font-semibold text-indigo-700 shadow-sm ring-1 ring-indigo-100">
-          <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-500" />
-          Tự động · Lấy 1000+ SP/web · Xuất Excel
-        </div>
-        <h1 className="bg-gradient-to-r from-indigo-600 via-blue-600 to-cyan-500 bg-clip-text text-3xl font-extrabold tracking-tight text-transparent sm:text-4xl">
-          Lấy Giá Sản Phẩm Tự Động
-        </h1>
-        <p className="mx-auto mt-3 max-w-2xl text-sm text-slate-500 sm:text-base">
-          Dán danh sách link website (mỗi dòng 1 link). Hệ thống tự lấy mã, tên, giá gốc, giá bán của toàn bộ
-          sản phẩm (chạy nhiều vòng để vượt giới hạn thời gian), rồi xuất Excel — mỗi web một tab, kèm tab tổng hợp tìm giá rẻ nhất.
-        </p>
-      </header>
-
-      <section className="rounded-2xl bg-white p-5 shadow-xl shadow-slate-200/60 ring-1 ring-slate-100 sm:p-7">
-        <div className="mb-2 flex items-center justify-between">
-          <label className="text-sm font-semibold text-slate-700">Danh sách link website</label>
-          <button onClick={loadSample} className="text-xs font-medium text-indigo-600 hover:underline" type="button">
-            Dùng link mẫu
-          </button>
-        </div>
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder={'https://website-1.com\nhttps://website-2.com\nhttps://website-3.com'}
-          rows={7}
-          className="w-full resize-y rounded-xl border border-slate-200 bg-slate-50/50 p-4 font-mono text-sm text-slate-700 outline-none transition focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
-        />
-
-        <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+    <ToastProvider>
+      <main className="mx-auto max-w-6xl px-4 py-6 sm:py-8">
+        <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 to-cyan-500 text-xl shadow-lg shadow-indigo-200">🏷️</div>
             <div>
-              <label className="block text-xs font-medium text-slate-500">Giới hạn SP / web</label>
-              <input
-                type="number"
-                min={50}
-                max={20000}
-                step={100}
-                value={maxProducts}
-                onChange={(e) => setMaxProducts(Math.max(50, Math.min(20000, Number(e.target.value) || 2000)))}
-                className="mt-1 w-28 rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
-              />
+              <h1 className="bg-gradient-to-r from-indigo-600 to-cyan-500 bg-clip-text text-xl font-extrabold text-transparent sm:text-2xl">So Giá &amp; Định Giá Tự Động</h1>
+              <p className="text-xs text-slate-400">Bếp Ngọc Bảo · đối chiếu giá thị trường &amp; cập nhật giá lên store</p>
             </div>
-            <span className="hidden text-xs text-slate-400 sm:block">{urls.length} link · web nhiều SP sẽ chạy lâu hơn</span>
           </div>
+          <button
+            onClick={() => { try { sessionStorage.removeItem('app_pw'); } catch {}; setAuthed(false); }}
+            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50"
+          >
+            Đăng xuất
+          </button>
+        </header>
 
-          <div className="flex gap-3">
+        {/* Tabs */}
+        <div className="mb-6 flex gap-1 rounded-2xl bg-white p-1.5 shadow-sm ring-1 ring-slate-100">
+          {TABS.map((t) => (
             <button
-              onClick={() => {
-                setText('');
-                setRows([]);
-              }}
-              disabled={running}
-              type="button"
-              className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`relative flex-1 rounded-xl px-3 py-2.5 text-sm font-semibold transition ${tab === t.id ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}
             >
-              Xoá
+              {tab === t.id && (
+                <motion.div layoutId="tabbg" className="absolute inset-0 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 shadow" transition={{ type: 'spring', stiffness: 380, damping: 30 }} />
+              )}
+              <span className="relative z-10">
+                <span className="mr-1.5">{t.icon}</span>
+                <span className="hidden sm:inline">{t.label}</span>
+                {t.id === 'compare' && matchedHint && <span className="ml-1.5 inline-block h-2 w-2 rounded-full bg-emerald-400 align-middle" />}
+              </span>
             </button>
-            {running ? (
-              <button
-                onClick={stop}
-                type="button"
-                className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-rose-500 to-red-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-rose-200 transition hover:from-rose-600 hover:to-red-700"
-              >
-                ■ Dừng
-              </button>
-            ) : (
-              <button
-                onClick={start}
-                disabled={urls.length === 0}
-                type="button"
-                className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-200 transition hover:from-indigo-700 hover:to-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                ⚡ Bắt đầu lấy dữ liệu
-              </button>
-            )}
-          </div>
+          ))}
         </div>
-      </section>
 
-      {rows.length > 0 && (
-        <section className="mt-8 animate-fade-in">
-          <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Stat label="Website" value={`${okSites}/${rows.length}`} />
-            <Stat label="Tổng sản phẩm" value={totalProducts.toLocaleString('vi-VN')} />
-            <Stat label="Tiến độ" value={`${progress}%`} />
-            <div className="flex items-center justify-center rounded-2xl bg-white p-2 shadow-sm ring-1 ring-slate-100">
-              <button
-                onClick={download}
-                disabled={downloading || totalProducts === 0}
-                type="button"
-                className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 py-2.5 text-sm font-bold text-white shadow-md shadow-emerald-200 transition hover:from-emerald-600 hover:to-green-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {downloading ? (
-                  <>
-                    <Spinner /> Đang tạo…
-                  </>
-                ) : (
-                  <>⬇ Tải Excel{!done && totalProducts > 0 ? ' (đã có)' : ''}</>
-                )}
-              </button>
-            </div>
-          </div>
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={tab}
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.22 }}
+          >
+            {tab === 'mine' && <MyProducts products={myProducts} setProducts={setMyProducts} password={password} />}
+            {tab === 'scan' && <Scraper password={password} rows={scrapeRows} setRows={setScrapeRows} />}
+            {tab === 'compare' && <Dashboard myProducts={myProducts} setMyProducts={setMyProducts} scrapeRows={scrapeRows} password={password} />}
+          </motion.div>
+        </AnimatePresence>
 
-          <div className="mb-5 h-2 w-full overflow-hidden rounded-full bg-slate-200">
-            <div
-              className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-cyan-500 transition-all duration-500"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-
-          <div className="space-y-3">
-            {rows.map((r, i) => (
-              <SiteCard key={i} row={r} />
-            ))}
-          </div>
-        </section>
-      )}
-
-      <footer className="mt-12 text-center text-xs text-slate-400">
-        Lấy theo nhiều chiến lược: API products.json / WooCommerce → trang danh mục → sitemap. Web dựng hoàn toàn bằng JS
-        cần cấu hình biến môi trường <code>SCRAPER_API_KEY</code>.
-      </footer>
-    </main>
-  );
-}
-
-function phaseText(platform?: string): string {
-  if (platform === 'shopify' || platform === 'woocommerce') return 'Đang tải sản phẩm qua API…';
-  if (platform === 'listing-pages') return 'Đang lấy theo trang danh mục…';
-  if (platform === 'sitemap') return 'Đang lấy theo sitemap…';
-  return 'Đang lấy dữ liệu…';
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl bg-white p-4 text-center shadow-sm ring-1 ring-slate-100">
-      <div className="text-2xl font-extrabold text-slate-800">{value}</div>
-      <div className="mt-0.5 text-xs font-medium text-slate-400">{label}</div>
-    </div>
-  );
-}
-
-function SiteCard({ row }: { row: Row }) {
-  const statusMap: Record<Status, { dot: string; text: string; label: string }> = {
-    pending: { dot: 'bg-slate-300', text: 'text-slate-400', label: 'Chờ' },
-    running: { dot: 'bg-amber-400 animate-pulse', text: 'text-amber-600', label: 'Đang lấy…' },
-    done: { dot: 'bg-emerald-500', text: 'text-emerald-600', label: 'Hoàn tất' },
-    error: { dot: 'bg-rose-500', text: 'text-rose-600', label: 'Lỗi' },
-  };
-  const s = statusMap[row.status];
-
-  return (
-    <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-100 transition hover:shadow-md">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${s.dot}`} />
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold text-slate-700">{row.siteName || row.input}</div>
-            <div className="truncate text-xs text-slate-400">{row.phase || row.input}</div>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {row.platform && row.status !== 'pending' && (
-            <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-600">
-              {PLATFORM_LABEL[row.platform] || row.platform}
-            </span>
-          )}
-          {(row.count || 0) > 0 && (
-            <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-600">
-              {(row.count || 0).toLocaleString('vi-VN')} SP
-            </span>
-          )}
-          <span className={`text-xs font-semibold ${s.text}`}>{s.label}</span>
-        </div>
-      </div>
-
-      {row.needsRender && (
-        <p className="mt-2 rounded-lg bg-orange-50 px-3 py-1.5 text-xs text-orange-700">
-          ⚠ Web chặn bot / dựng bằng JS — cần cấu hình <code>SCRAPER_API_KEY</code> để lấy được.
-        </p>
-      )}
-      {row.note && row.status === 'done' && (
-        <p className="mt-2 rounded-lg bg-amber-50 px-3 py-1.5 text-xs text-amber-700">{row.note}</p>
-      )}
-      {row.error && <p className="mt-2 rounded-lg bg-rose-50 px-3 py-1.5 text-xs text-rose-700">{row.error}</p>}
-
-      {row.products && row.products.length > 0 && (
-        <details className="mt-3">
-          <summary className="cursor-pointer text-xs font-medium text-indigo-600 hover:underline">
-            Xem trước {Math.min(5, row.products.length)} sản phẩm
-          </summary>
-          <div className="mt-2 overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="text-slate-400">
-                <tr>
-                  <th className="py-1 pr-3 font-medium">Mã</th>
-                  <th className="py-1 pr-3 font-medium">Tên</th>
-                  <th className="py-1 pr-3 text-right font-medium">Giá gốc</th>
-                  <th className="py-1 text-right font-medium">Giá bán</th>
-                </tr>
-              </thead>
-              <tbody className="text-slate-600">
-                {row.products.slice(0, 5).map((p, i) => (
-                  <tr key={i} className="border-t border-slate-100">
-                    <td className="py-1 pr-3 font-mono text-[11px] text-slate-400">{p.code || '—'}</td>
-                    <td className="max-w-xs truncate py-1 pr-3">{p.name}</td>
-                    <td className="py-1 pr-3 text-right text-slate-400 line-through">
-                      {p.originalPrice && p.originalPrice !== p.salePrice ? p.originalPrice.toLocaleString('vi-VN') : ''}
-                    </td>
-                    <td className="py-1 text-right font-semibold text-rose-600">
-                      {p.salePrice ? p.salePrice.toLocaleString('vi-VN') : ''}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </details>
-      )}
-    </div>
-  );
-}
-
-function Spinner() {
-  return (
-    <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
-      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z" />
-    </svg>
+        <footer className="mt-10 text-center text-xs text-slate-400">
+          Giá đối chiếu tự khớp theo mã/model/tên · Cập nhật giá ghi thẳng lên Haravan (có xác nhận &amp; hoàn tác).
+        </footer>
+      </main>
+    </ToastProvider>
   );
 }

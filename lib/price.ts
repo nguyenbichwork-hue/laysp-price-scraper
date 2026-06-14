@@ -64,12 +64,13 @@ export function modelFromName(name: string): string {
   const s = name
     .replace(/[–—]/g, '-')
     .replace(/&[#\w]+;/g, ' ')
-    .replace(/\([^)]*\)/g, ' ') // bỏ "(2 Màu: ...)" cuối tên
-    .replace(/[()]/g, ' ')
+    .replace(/\[[^\]]*\]/g, ' ') // bỏ "[CHÍNH HÃNG]"
+    .replace(/\([^)]*\)/g, ' ') // bỏ "(2 Màu: ...)"
+    .replace(/[()|]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   const toks = s.split(' ').map((t) => t.replace(/[,.;:]+$/, ''));
-  const clean = (t: string) => /^[A-Za-z0-9][A-Za-z0-9\-/.]*$/.test(t);
+  const clean = (t: string) => /^[A-Za-z0-9][A-Za-z0-9\-/.+]*$/.test(t);
   const strong = (t: string) => clean(t) && /[A-Za-z]/.test(t) && /\d/.test(t);
   let anchor = -1;
   for (let i = toks.length - 1; i >= 0; i--) if (strong(toks[i])) { anchor = i; break; }

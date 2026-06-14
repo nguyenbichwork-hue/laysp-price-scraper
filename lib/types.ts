@@ -60,6 +60,52 @@ export interface TaskRoundResult {
   error?: string;
 }
 
+// ----- Store của tôi (Haravan) & đối chiếu giá -----
+
+export interface MyProduct {
+  productId: number;
+  variantIds: number[]; // các variant để cập nhật giá
+  sku: string;
+  code: string; // mã model (bestCode) dùng để khớp
+  name: string;
+  price: number; // giá bán hiện tại (đại diện)
+  comparePrice: number | null; // giá niêm yết (compare_at_price)
+  productType: string; // nhóm sản phẩm
+  vendor: string; // hãng
+  tags: string;
+  image: string;
+  handle: string;
+  url: string;
+  inventory: number;
+}
+
+export interface MarketPrice {
+  siteName: string;
+  price: number;
+  url: string;
+}
+
+export interface ComparisonRow {
+  product: MyProduct;
+  market: MarketPrice[];
+  marketMin: number | null;
+  marketMax: number | null;
+  marketAvg: number | null;
+  siteCount: number;
+  /** % giá của tôi so với giá thấp nhất thị trường: (myPrice-min)/min*100 */
+  pctVsMin: number | null;
+  /** khớp theo: sku | model | name */
+  matchedBy: 'sku' | 'model' | 'name' | null;
+}
+
+export interface PriceUpdateResult {
+  variantId: number;
+  ok: boolean;
+  oldPrice?: number;
+  newPrice?: number;
+  error?: string;
+}
+
 export interface SiteResult {
   /** URL gốc người dùng nhập */
   url: string;
