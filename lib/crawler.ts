@@ -75,7 +75,7 @@ export async function discover(inputUrl: string, cfgPartial: Partial<CrawlConfig
     }
 
     // 3) Tải trang chủ (decode charset đúng)
-    const home = await smartFetch(url, { accept: 'html', timeoutMs: 20000, retries: 2 });
+    const home = await smartFetch(url, { accept: 'html', timeoutMs: 30000, retries: 3 });
     if (home.blocked) {
       return {
         url: inputUrl, siteName, platform: 'unknown', mode: 'done', products: [], needsRender: true,
@@ -83,9 +83,13 @@ export async function discover(inputUrl: string, cfgPartial: Partial<CrawlConfig
       };
     }
     if (!home.ok) {
+      // HTTP 0 = kết nối bị chặn/reset (web chặn IP máy chủ Vercel) -> cần proxy
+      const blockedIp = home.status === 0;
       return {
-        url: inputUrl, siteName, platform: 'unknown', mode: 'done', products: [],
-        error: `Không tải được trang chủ (HTTP ${home.status}).`,
+        url: inputUrl, siteName, platform: 'unknown', mode: 'done', products: [], needsRender: blockedIp,
+        error: blockedIp
+          ? 'Web chặn IP máy chủ (chống bot mạnh, vd Điện Máy Xanh/TGDD). Cần cấu hình SCRAPER_API_KEY (proxy IP Việt Nam) để lấy được.'
+          : `Không tải được trang chủ (HTTP ${home.status}).`,
       };
     }
 
