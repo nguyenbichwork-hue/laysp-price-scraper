@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
   if (!url) return NextResponse.json({ error: 'Thiếu url' }, { status: 400 });
 
   const maxProducts = Math.min(Number(body?.maxProducts) || 2000, 20000);
-  const cfg = { maxProducts, timeBudgetMs: 45000, concurrency: 14 };
+  const cfg = { maxProducts, timeBudgetMs: 48000, concurrency: 12 };
 
   // Có task -> vòng làm việc tiếp; không -> vòng khám phá
   if (body?.task) {

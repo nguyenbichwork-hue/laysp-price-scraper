@@ -23,7 +23,7 @@ export interface CrawlConfig {
   concurrency: number;
 }
 
-const DEFAULTS: CrawlConfig = { maxProducts: 2000, timeBudgetMs: 45000, concurrency: 14 };
+const DEFAULTS: CrawlConfig = { maxProducts: 2000, timeBudgetMs: 48000, concurrency: 12 };
 
 function siteNameFromUrl(url: string): string {
   try {
@@ -96,13 +96,15 @@ export async function discover(inputUrl: string, cfgPartial: Partial<CrawlConfig
     //    worklist = trang danh mục (menu) + URL sản phẩm (sitemap). Giá luôn lấy từ trang chi tiết.
     const sitemapUrls = await collectSitemapUrls(origin, deadline);
     const productUrls = sitemapUrls.length ? prioritizeProductUrls(sitemapUrls, origin, navSet, cfg.maxProducts) : [];
-    const worklist = dedupeUrls([...menuLinks, ...productUrls]);
+    // Có sitemap -> dùng URL sản phẩm trực tiếp (sản phẩm lên trước, lợi suất cao).
+    // Không có sitemap -> dùng menu danh mục để "trải" ra URL sản phẩm.
+    const worklist = productUrls.length >= 3 ? productUrls : dedupeUrls(menuLinks);
     if (worklist.length >= 3) {
       const totalGuess = sitemapUrls.length ? new Set(sitemapUrls.map(normUrlLocal)).size : null;
       return {
         url: inputUrl, siteName, platform: sitemapUrls.length ? 'sitemap' : 'listing-pages',
         mode: 'urls', urlMode: 'auto', worklist, products: [], total: totalGuess,
-        note: totalGuess ? `Quét ${menuLinks.length} danh mục + ${totalGuess} URL sitemap (giá lấy từ trang chi tiết).` : `Quét ${menuLinks.length} danh mục.`,
+        note: totalGuess ? `Quét tối đa ${cfg.maxProducts} sản phẩm (sitemap ${totalGuess} URL, giá từ trang chi tiết).` : `Quét ${menuLinks.length} danh mục.`,
       };
     }
 

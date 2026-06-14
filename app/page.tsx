@@ -90,14 +90,23 @@ export default function Home() {
     setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   }
 
-  async function callApi(url: string, task?: Task): Promise<any> {
-    const res = await fetch('/api/scrape', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, maxProducts, task }),
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    return res.json();
+  async function callApi(url: string, task?: Task, retries = 2): Promise<any> {
+    let lastErr: any = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const res = await fetch('/api/scrape', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, maxProducts, task }),
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.json(); // có thể ném nếu body không phải JSON (lỗi nền tảng)
+      } catch (e) {
+        lastErr = e;
+        if (attempt < retries) await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
+      }
+    }
+    throw lastErr;
   }
 
   async function runSite(i: number, url: string) {
@@ -145,7 +154,7 @@ export default function Home() {
       else if (disc.mode === 'urls' && Array.isArray(disc.worklist)) {
         const mode: 'auto' | 'listing' | 'detail' =
           disc.urlMode === 'detail' ? 'detail' : disc.urlMode === 'listing' ? 'listing' : 'auto';
-        const batchSize = mode === 'listing' ? LISTING_BATCH : mode === 'detail' ? DETAIL_BATCH : 40;
+        const batchSize = mode === 'listing' ? LISTING_BATCH : mode === 'detail' ? DETAIL_BATCH : 50;
         const worklist: string[] = [];
         const wlSeen = new Set<string>();
         const enqueue = (us: string[]) => {
@@ -167,13 +176,18 @@ export default function Home() {
           pos += batch.length;
           const before = worklist.length;
           patchRow(i, { phase: `Đang lấy… ${products.length} SP (đã quét ${pos}/${worklist.length} trang)` });
-          const r = await callApi(url, { strategy: 'fetchUrls', mode, urls: batch });
-          const added = addAll(r.products);
-          if (r.enqueueUrls) enqueue(r.enqueueUrls);
-          patchRow(i, { products: [...products], count: products.length });
+          let added = 0;
+          try {
+            const r = await callApi(url, { strategy: 'fetchUrls', mode, urls: batch });
+            added = addAll(r.products);
+            if (r.enqueueUrls) enqueue(r.enqueueUrls);
+            patchRow(i, { products: [...products], count: products.length });
+          } catch {
+            // batch lỗi (server quá tải) -> bỏ qua, tiếp tục batch sau
+          }
           const grew = worklist.length > before;
           dry = added === 0 && !grew ? dry + 1 : 0;
-          if (dry >= 5 && pos >= worklist.length) break;
+          if (dry >= 6 && pos >= worklist.length) break;
         }
       }
 

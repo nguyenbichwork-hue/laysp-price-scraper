@@ -155,24 +155,29 @@ export async function collectSitemapUrls(origin: string, deadline: number): Prom
   return urls;
 }
 
-/** Ưu tiên URL sản phẩm (không nằm trong menu), loại trùng. */
+/**
+ * Chọn URL sản phẩm: loại trùng + loại trang menu/danh mục, ưu tiên URL có dấu hiệu
+ * sản phẩm. Nếu sitemap khổng lồ -> LẤY MẪU TRẢI ĐỀU toàn danh sách (sitemap thường
+ * liệt kê danh mục ở đầu, sản phẩm ở phần sau & chiếm đa số -> trải đều sẽ trúng SP).
+ */
 export function prioritizeProductUrls(urls: string[], origin: string, navSet: Set<string>, max: number): string[] {
   const homeNorm = normUrlLocal(origin);
   const seen = new Set<string>();
   const uniq: string[] = [];
   for (const u of urls) {
     const n = normUrlLocal(u);
-    if (n === homeNorm || seen.has(n)) continue;
+    if (n === homeNorm || seen.has(n) || navSet.has(n)) continue; // bỏ trang menu/danh mục
     seen.add(n);
     uniq.push(u);
   }
-  const scored = uniq.map((u) => {
-    let rank = PRODUCT_URL_HINTS.test(u) ? 0 : 1;
-    if (navSet.has(normUrlLocal(u))) rank += 3;
-    return { u, rank };
-  });
-  scored.sort((a, b) => a.rank - b.rank);
-  return scored.slice(0, max).map((s) => s.u);
+  const hinted = uniq.filter((u) => PRODUCT_URL_HINTS.test(u));
+  const pool = hinted.length >= Math.min(max, 50) ? hinted : uniq;
+  if (pool.length <= max) return pool;
+  // Lấy mẫu trải đều để tránh phần danh mục dồn ở đầu sitemap
+  const stride = pool.length / max;
+  const out: string[] = [];
+  for (let i = 0; i < max; i++) out.push(pool[Math.floor(i * stride)]);
+  return out;
 }
 
 // ============ Worker pool fetch + extract ============
@@ -272,12 +277,14 @@ export async function processAutoUrls(
     const res = await smartFetch(url, { accept: 'html', timeoutMs: 15000, retries: 1 });
     if (!res.ok) return;
     // Lấy sản phẩm của chính trang (nếu là trang chi tiết)
-    for (const p of extractProductsFromHtml(res.text, url, true)) {
-      if (sane(p)) products.push(p);
+    const own = extractProductsFromHtml(res.text, url, true).filter(sane);
+    if (own.length > 0) {
+      products.push(...own);
+      return; // là trang chi tiết -> không cần parse listing (tiết kiệm CPU)
     }
-    // Nếu là trang danh mục -> thu URL sản phẩm + trang kế để fetch chi tiết sau
+    // Không phải trang chi tiết -> có thể là trang danh mục: thu URL sản phẩm + trang kế
     const listing = extractListing(res.text, url);
-    if (listing.length >= 6) {
+    if (listing.length >= 4) {
       for (const it of listing) enqueue.push(it.url);
       const np = nextPageUrl(url, res.text);
       if (np) enqueue.push(np);
