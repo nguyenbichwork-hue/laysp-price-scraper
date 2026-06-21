@@ -37,3 +37,7 @@ yarn-error.log*
 _*.js
 _*.html
 _*.xlsx
+
+# video phân tích & thư mục tạm
+/video.mp4
+/_vid_frames/

@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { MyProduct, SiteResult, ComparisonRow } from '@/lib/types';
-import { buildComparison, suggestPrice, priceWarning } from '@/lib/match';
+import { buildComparison, suggestPrice, priceWarning, lossRisk } from '@/lib/match';
 import { fmtVnd, fmtNum, Stat, Modal, Spinner, useToast } from './common';
 import type { SRow } from './Scraper';
 
@@ -22,6 +22,7 @@ export default function Dashboard({
 }) {
   const toast = useToast();
   const [floorPct, setFloorPct] = useState(85);
+  const [minMargin, setMinMargin] = useState(5); // % lãi tối thiểu trên giá vốn
   const [highT, setHighT] = useState(10);
   const [lowT, setLowT] = useState(5);
   const [q, setQ] = useState('');
@@ -56,14 +57,18 @@ export default function Dashboard({
   const vendors = useMemo(() => Array.from(new Set(myProducts.map((p) => p.vendor).filter(Boolean))).sort(), [myProducts]);
 
   const fp = floorPct / 100;
+  const mm = minMargin / 100;
   const warnOf = (r: ComparisonRow) => priceWarning(r, highT / 100, lowT / 100);
-  const sugOf = (r: ComparisonRow) => suggestPrice(r, fp);
+  const sugOf = (r: ComparisonRow) => suggestPrice(r, fp, mm);
+  const lossOf = (r: ComparisonRow) => lossRisk(r, mm);
   const priceFor = (r: ComparisonRow) => edits[r.product.productId] ?? sugOf(r) ?? r.product.price;
 
   // Thống kê
   const matched = rows.filter((r) => r.marketMin != null);
   const nCao = matched.filter((r) => warnOf(r) === 'cao').length;
   const nThap = matched.filter((r) => warnOf(r) === 'thap').length;
+  const nLo = matched.filter((r) => lossOf(r)).length;
+  const hasCost = myProducts.some((p) => p.cost != null && p.cost > 0);
 
   // Lọc
   const filtered = useMemo(() => {
@@ -73,11 +78,12 @@ export default function Dashboard({
       if (onlyMatched && r.marketMin == null) return false;
       if (fType && p.productType !== fType) return false;
       if (fVendor && p.vendor !== fVendor) return false;
-      if (fWarn && warnOf(r) !== fWarn) return false;
+      if (fWarn === 'lo') { if (!lossOf(r)) return false; }
+      else if (fWarn && warnOf(r) !== fWarn) return false;
       if (qq && !(p.name.toLowerCase().includes(qq) || (p.code || '').toLowerCase().includes(qq))) return false;
       return true;
     });
-  }, [rows, q, fType, fVendor, fWarn, onlyMatched, highT, lowT]);
+  }, [rows, q, fType, fVendor, fWarn, onlyMatched, highT, lowT, mm]);
 
   const pageRows = filtered.slice(page * PAGE, page * PAGE + PAGE);
   const totalPages = Math.ceil(filtered.length / PAGE);
@@ -112,7 +118,7 @@ export default function Dashboard({
       const res = await fetch('/api/update-price', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-app-password': password },
-        body: JSON.stringify({ updates: ups.map((u) => ({ variantId: u.variantId, price: u.price })) }),
+        body: JSON.stringify({ updates: ups.map((u) => ({ variantId: u.variantId, price: u.price })), isUndo }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -160,11 +166,12 @@ export default function Dashboard({
   return (
     <div className="space-y-5">
       {/* Thống kê */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
         <Stat label="SP của tôi" value={fmtNum(myProducts.length)} />
         <Stat label="Có giá thị trường" value={fmtNum(matched.length)} accent="indigo" />
         <Stat label="Giá đang CAO" value={fmtNum(nCao)} accent="rose" />
         <Stat label="Giá đang THẤP" value={fmtNum(nThap)} accent="amber" />
+        <Stat label="🩸 Rủi ro lỗ" value={hasCost ? fmtNum(nLo) : '—'} accent="rose" />
         <Stat label="Web đã quét" value={fmtNum(sites.length)} accent="emerald" />
       </div>
 
@@ -173,13 +180,16 @@ export default function Dashboard({
         <Field label="Sàn an toàn (% giá hiện tại)">
           <input type="number" min={50} max={100} value={floorPct} onChange={(e) => setFloorPct(Math.max(50, Math.min(100, +e.target.value || 85)))} className="w-20 rounded-lg border border-slate-200 px-3 py-1.5 text-sm" />
         </Field>
+        <Field label="% lãi tối thiểu (trên giá vốn)">
+          <input type="number" min={0} max={100} value={minMargin} onChange={(e) => setMinMargin(Math.max(0, Math.min(100, +e.target.value || 0)))} className="w-20 rounded-lg border border-slate-200 px-3 py-1.5 text-sm" />
+        </Field>
         <Field label="Cảnh báo CAO khi vượt %">
           <input type="number" min={0} max={100} value={highT} onChange={(e) => setHighT(+e.target.value || 0)} className="w-20 rounded-lg border border-slate-200 px-3 py-1.5 text-sm" />
         </Field>
         <Field label="Cảnh báo THẤP khi dưới %">
           <input type="number" min={0} max={100} value={lowT} onChange={(e) => setLowT(+e.target.value || 0)} className="w-20 rounded-lg border border-slate-200 px-3 py-1.5 text-sm" />
         </Field>
-        <p className="text-xs text-slate-400">Giá đề xuất = giá thấp nhất thị trường, không dưới sàn.</p>
+        <p className="text-xs text-slate-400">Giá đề xuất = giá thấp nhất thị trường, không dưới sàn {hasCost ? 'và luôn đảm bảo lãi tối thiểu trên giá vốn.' : '. (Nạp giá vốn để bật chặn lỗ.)'}</p>
       </div>
 
       {/* Bộ lọc */}
@@ -187,7 +197,7 @@ export default function Dashboard({
         <input value={q} onChange={(e) => { setQ(e.target.value); setPage(0); }} placeholder="🔍 Tìm mã / tên…" className="min-w-[180px] flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-400" />
         <Select value={fType} onChange={(v) => { setFType(v); setPage(0); }} placeholder="Tất cả nhóm" options={types} />
         <Select value={fVendor} onChange={(v) => { setFVendor(v); setPage(0); }} placeholder="Tất cả hãng" options={vendors} />
-        <Select value={fWarn} onChange={(v) => { setFWarn(v); setPage(0); }} placeholder="Mọi cảnh báo" options={[{ v: 'cao', t: '🔴 Giá cao' }, { v: 'thap', t: '🟡 Giá thấp' }, { v: 'ok', t: '🟢 Hợp lý' }]} />
+        <Select value={fWarn} onChange={(v) => { setFWarn(v); setPage(0); }} placeholder="Mọi cảnh báo" options={[{ v: 'cao', t: '🔴 Giá cao' }, { v: 'thap', t: '🟡 Giá thấp' }, { v: 'ok', t: '🟢 Hợp lý' }, { v: 'lo', t: '🩸 Rủi ro lỗ' }]} />
         <label className="flex items-center gap-1.5 rounded-lg px-2 py-2 text-sm text-slate-600">
           <input type="checkbox" checked={onlyMatched} onChange={(e) => { setOnlyMatched(e.target.checked); setPage(0); }} /> chỉ SP có giá TT
         </label>
@@ -211,7 +221,7 @@ export default function Dashboard({
           </thead>
           <tbody>
             {pageRows.map((r) => (
-              <Row key={r.product.productId} r={r} warn={warnOf(r)} suggested={sugOf(r)} priceVal={priceFor(r)}
+              <Row key={r.product.productId} r={r} warn={warnOf(r)} loss={lossOf(r)} suggested={sugOf(r)} priceVal={priceFor(r)}
                 selected={selected.has(r.product.productId)}
                 onSelect={() => setSelected((p) => { const n = new Set(p); n.has(r.product.productId) ? n.delete(r.product.productId) : n.add(r.product.productId); return n; })}
                 onPrice={(v) => setEdits((e) => ({ ...e, [r.product.productId]: v }))} />
@@ -306,8 +316,8 @@ function Select({ value, onChange, placeholder, options }: { value: string; onCh
   );
 }
 
-function Row({ r, warn, suggested, priceVal, selected, onSelect, onPrice }: {
-  r: ComparisonRow; warn: 'cao' | 'thap' | 'ok' | null; suggested: number | null; priceVal: number;
+function Row({ r, warn, loss, suggested, priceVal, selected, onSelect, onPrice }: {
+  r: ComparisonRow; warn: 'cao' | 'thap' | 'ok' | null; loss: boolean; suggested: number | null; priceVal: number;
   selected: boolean; onSelect: () => void; onPrice: (v: number) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -328,12 +338,17 @@ function Row({ r, warn, suggested, priceVal, selected, onSelect, onPrice }: {
           {r.marketMin != null ? (
             <div>
               <div className="font-semibold text-indigo-600">{fmtVnd(r.marketMin)}</div>
-              <div className="text-[10px] text-slate-400">tb {fmtNum(r.marketAvg)} · {r.siteCount} web</div>
+              <div className="text-[10px] text-slate-400">tb {fmtNum(r.marketAvg)} · {r.siteCount} web{r.dropped ? ` · loại ${r.dropped} giá ảo` : ''}</div>
             </div>
           ) : <span className="text-xs text-slate-300">chưa có</span>}
         </td>
         <td className={`px-2 py-2 text-center font-bold ${pctColor}`}>{pct == null ? '—' : (pct > 0 ? '+' : '') + pct.toFixed(0) + '%'}</td>
-        <td className="px-2 py-2 text-center">{warnBadge}</td>
+        <td className="px-2 py-2 text-center">
+          <div className="flex flex-col items-center gap-1">
+            {warnBadge}
+            {loss && <Badge c="rose">🩸 Lỗ</Badge>}
+          </div>
+        </td>
         <td className="px-2 py-2 text-right">
           {r.marketMin != null ? (
             <input type="number" value={Math.round(priceVal)} onChange={(e) => onPrice(Math.max(0, +e.target.value || 0))}

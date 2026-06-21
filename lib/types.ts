@@ -69,6 +69,7 @@ export interface MyProduct {
   code: string; // mã model (bestCode) dùng để khớp
   name: string;
   price: number; // giá bán hiện tại (đại diện)
+  cost?: number | null; // giá vốn (lấy từ Google Sheet / nhập tay) – để chặn định giá lỗ
   comparePrice: number | null; // giá niêm yết (compare_at_price)
   productType: string; // nhóm sản phẩm
   vendor: string; // hãng
@@ -96,6 +97,8 @@ export interface ComparisonRow {
   pctVsMin: number | null;
   /** khớp theo: sku | model | name */
   matchedBy: 'sku' | 'model' | 'name' | null;
+  /** Số giá bị loại vì nghi giá ảo/outlier (để hiển thị minh bạch) */
+  dropped?: number;
 }
 
 export interface PriceUpdateResult {

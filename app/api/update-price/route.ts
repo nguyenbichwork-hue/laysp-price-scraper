@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { updateVariantPrice } from '@/lib/haravan';
 import { authGuard } from '@/lib/auth';
+import { sendTelegram } from '@/lib/telegram';
 import type { PriceUpdateResult } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -36,6 +37,15 @@ export async function POST(req: NextRequest) {
     }
     const r = await updateVariantPrice(variantId, price);
     results.push({ variantId, ok: r.ok, oldPrice: r.oldPrice, newPrice: price, error: r.error });
+  }
+
+  // Thông báo Telegram (bỏ qua nếu chưa cấu hình). Không chặn phản hồi nếu lỗi.
+  const okCount = results.filter((r) => r.ok).length;
+  const failCount = results.length - okCount;
+  if (!body?.isUndo && okCount > 0) {
+    sendTelegram(
+      `💰 <b>Cập nhật giá Bếp Ngọc Bảo</b>\nThành công: <b>${okCount}</b> SP${failCount ? `\nLỗi: ${failCount}` : ''}`,
+    ).catch(() => {});
   }
 
   return NextResponse.json({ results, ok: results.every((r) => r.ok) });

@@ -7,14 +7,16 @@ import Login from '@/components/Login';
 import Scraper, { type SRow } from '@/components/Scraper';
 import MyProducts from '@/components/MyProducts';
 import Dashboard from '@/components/Dashboard';
+import SheetSync from '@/components/SheetSync';
 import type { MyProduct } from '@/lib/types';
 
-type Tab = 'mine' | 'scan' | 'compare';
+type Tab = 'mine' | 'scan' | 'compare' | 'sheet';
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: 'mine', label: 'Sản phẩm của tôi', icon: '🏬' },
   { id: 'scan', label: 'Quét thị trường', icon: '🔎' },
   { id: 'compare', label: 'Đối chiếu & Định giá', icon: '⚖️' },
+  { id: 'sheet', label: 'Google Sheet', icon: '📊' },
 ];
 
 export default function Home() {
@@ -88,6 +90,7 @@ export default function Home() {
             {tab === 'mine' && <MyProducts products={myProducts} setProducts={setMyProducts} password={password} />}
             {tab === 'scan' && <Scraper password={password} rows={scrapeRows} setRows={setScrapeRows} />}
             {tab === 'compare' && <Dashboard myProducts={myProducts} setMyProducts={setMyProducts} scrapeRows={scrapeRows} password={password} />}
+            {tab === 'sheet' && <SheetSync scrapeRows={scrapeRows} password={password} />}
           </motion.div>
         </AnimatePresence>
 
